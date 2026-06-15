@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NeuroSploit v3.3.0</title>
+<style>
+  :root{
+    --bg:#0b0c10; --panel:#14161d; --panel2:#1b1e27; --line:#262a36;
+    --text:#e7e9ee; --muted:#8b91a3; --accent:#8b5cf6; --accent2:#a855f7;
+    --ok:#34d399; --warn:#fbbf24; --crit:#f87171;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#1a1430 0,var(--bg) 55%);
+    color:var(--text);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:48px 20px}
+  .wrap{width:100%;max-width:560px}
+  .brand{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:grid;place-items:center;font-weight:800;color:#fff;box-shadow:0 6px 24px rgba(139,92,246,.35)}
+  h1{font-size:20px;margin:0;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:13px;margin:2px 0 22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;
+    box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  label{display:block;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:0 0 6px}
+  .field{margin-bottom:16px}
+  input[type=text],select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:10px;padding:11px 12px;font-size:14px;outline:none;transition:border .15s}
+  input[type=text]:focus,select:focus{border-color:var(--accent)}
+  .row{display:flex;gap:12px}.row>.field{flex:1}
+  .toggles{display:flex;gap:10px;margin:4px 0 20px}
+  .toggle{flex:1;display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:10px 12px;cursor:pointer;user-select:none;font-size:13px}
+  .toggle input{accent-color:var(--accent);width:16px;height:16px}
+  .toggle.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px rgba(139,92,246,.3)}
+  .btns{display:flex;gap:10px}
+  button{flex:1;border:0;border-radius:11px;padding:13px;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+  .run{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+  .run:hover{filter:brightness(1.08)}
+  .ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+  .ghost:hover{border-color:var(--accent)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .meta{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:14px}
+  .pill{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+  .pill b{color:var(--text)}
+  #console{margin-top:18px;background:#0a0b10;border:1px solid var(--line);border-radius:12px;
+    padding:14px;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cdd3e0;
+    max-height:230px;overflow:auto;display:none;white-space:pre-wrap}
+  #console .l{opacity:.9}#console .e{color:var(--crit)}
+  .sevline{margin-top:10px;display:none;gap:8px;flex-wrap:wrap}
+  .sev{border-radius:8px;padding:5px 10px;font-size:12px;font-weight:600}
+  .sev.Critical{background:rgba(248,113,113,.15);color:var(--crit)}
+  .sev.High{background:rgba(251,191,36,.15);color:var(--warn)}
+  .sev.none{background:rgba(52,211,153,.12);color:var(--ok)}
+  .foot{text-align:center;color:var(--muted);font-size:11px;margin-top:18px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">N</div>
+    <div><h1>NeuroSploit <span style="color:var(--muted);font-weight:500">v3.3.0</span></h1></div>
+  </div>
+  <div class="sub">Autonomous MD-Agent pentest — enter a URL, pick a backend, run.</div>
+
+  <div class="card">
+    <div class="field">
+      <label for="url">Target URL</label>
+      <input id="url" type="text" placeholder="https://target.example" autocomplete="off" />
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="backend">Backend</label>
+        <select id="backend"></select>
+      </div>
+      <div class="field">
+        <label for="model">Model</label>
+        <select id="model"></select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="collab">OOB collaborator <span style="text-transform:none">(optional)</span></label>
+      <input id="collab" type="text" placeholder="oob.your-collab.net" autocomplete="off" />
+    </div>
+
+    <div class="toggles">
+      <label class="toggle on" id="t-rl"><input type="checkbox" id="rl" checked /> Reinforcement learning</label>
+      <label class="toggle on" id="t-mcp"><input type="checkbox" id="mcp" checked /> Playwright MCP</label>
+    </div>
+
+    <div class="btns">
+      <button class="run" id="go">▶ Run engagement</button>
+      <button class="ghost" id="dry">Dry run</button>
+    </div>
+
+    <div class="meta" id="meta">
+      <span class="pill"><span class="dot"></span><b id="agentCount">…</b> agents</span>
+      <span class="pill"><b id="backendCount">…</b> backends</span>
+      <span class="pill">Playwright proof-of-exec</span>
+    </div>
+
+    <div class="sevline" id="sevline"></div>
+    <div id="console"></div>
+  </div>
+
+  <div class="foot">Authorized testing only · findings are validated &amp; false-positive-filtered before reporting</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let INFO = null;
+
+function setToggle(id){ const c=$('#'+id), box=$('#t-'+id);
+  const sync=()=>box.classList.toggle('on',c.checked); c.addEventListener('change',sync); sync(); }
+setToggle('rl'); setToggle('mcp');
+
+function fillModels(){
+  const bk = $('#backend').value;
+  const prov = (INFO.backend_provider[bk]) || 'anthropic';
+  const ms = (INFO.providers[prov]||{}).models || [];
+  $('#model').innerHTML = ms.map(m=>`<option value="${m.id}">${m.label}</option>`).join('') || '<option value="">default</option>';
+}
+
+async function loadInfo(){
+  INFO = await (await fetch('/api/info')).json();
+  $('#agentCount').textContent = INFO.agents.total;
+  $('#backendCount').textContent = INFO.backends.length;
+  const bsel = $('#backend');
+  bsel.innerHTML = INFO.backends.map(b=>`<option value="${b.key}">${b.label}</option>`).join('')
+                   || '<option value="claude">Claude Code</option>';
+  bsel.addEventListener('change', fillModels);
+  fillModels();
+}
+
+function logLine(t, cls){ const c=$('#console'); c.style.display='block';
+  const d=document.createElement('div'); d.className=cls||'l'; d.textContent=t; c.appendChild(d); c.scrollTop=c.scrollHeight; }
+
+async function run(dry){
+  const url = $('#url').value.trim();
+  if(!url){ $('#url').focus(); $('#url').style.borderColor='var(--crit)'; return; }
+  $('#go').disabled=$('#dry').disabled=true;
+  $('#console').innerHTML=''; $('#sevline').style.display='none';
+  logLine((dry?'[dry-run] ':'')+'Starting engagement → '+url);
+  const body = { url, backend:$('#backend').value, model:$('#model').value,
+    collaborator:$('#collab').value.trim(), rl:$('#rl').checked, mcp:$('#mcp').checked, dry_run:!!dry };
+  const r = await (await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(r.error){ logLine('ERROR: '+r.error,'e'); $('#go').disabled=$('#dry').disabled=false; return; }
+  poll(r.run_id);
+}
+
+let seen=0;
+async function poll(id){
+  const st = await (await fetch('/api/status/'+id)).json();
+  (st.log||[]).slice(seen).forEach(l=>logLine(l, l.startsWith('ERROR')?'e':'l'));
+  seen = (st.log||[]).length;
+  if(!st.done){ setTimeout(()=>poll(id),700); return; }
+  seen=0; $('#go').disabled=$('#dry').disabled=false;
+  const res=st.result||{};
+  const sl=$('#sevline'); sl.style.display='flex';
+  if(res.error){ sl.innerHTML='<span class="sev Critical">error</span>'; return; }
+  const f=res.findings||[]; const by={};
+  f.forEach(x=>by[x.severity]=(by[x.severity]||0)+1);
+  sl.innerHTML = f.length ? Object.entries(by).map(([k,v])=>`<span class="sev ${k}">${k}: ${v}</span>`).join('')
+                          : '<span class="sev none">✓ run complete — '+ (res.agents_ran||[]).length +' agents, 0 validated findings</span>';
+}
+
+$('#go').addEventListener('click',()=>run(false));
+$('#dry').addEventListener('click',()=>run(true));
+$('#url').addEventListener('input',()=>$('#url').style.borderColor='');
+loadInfo();
+</script>
+</body>
+</html>

@@ -114,6 +114,19 @@ data-driven builder, `scripts/build_agents.py`). It is picked up automatically.
 Outputs land in `results/<target>/findings.json` and `reports/`, and the RL
 state updates in `data/rl_state.json`.
 
+### Minimalist web GUI
+
+A zero-dependency (Python stdlib only) web front-end exposes just the essential
+options — target URL, backend, model, collaborator, and the RL / Playwright-MCP
+toggles — and launches an engagement with a live progress console:
+
+```bash
+python3 webgui/server.py        # → http://127.0.0.1:8787
+```
+
+No npm, no build step. It calls `neurosploit_agent` directly. (The previous heavy
+React app remains under `frontend/` but is no longer the primary interface.)
+
 ### Backends
 
 | Backend | Binary | Autonomy flag | Subscription |

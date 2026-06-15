@@ -81,3 +81,9 @@ results/
 
 # v3.3.0 runtime RL state
 data/rl_state.json
+
+# Playwright demo artifacts
+.playwright-mcp/
+neurosploit_gui_*.png
+neurosploit_demo_*.png
+logs/webgui.log
