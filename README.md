@@ -1,41 +1,76 @@
-# NeuroSploit v3.3.0
+# NeuroSploit v3.4.0
 
 ![NeuroSploit](https://img.shields.io/badge/NeuroSploit-Autonomous%20AI%20Pentest-blueviolet)
-![Version](https://img.shields.io/badge/Version-3.3.0-blue)
+![Version](https://img.shields.io/badge/Version-3.4.0-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Agents](https://img.shields.io/badge/MD%20Agents-213-red)
-![Backends](https://img.shields.io/badge/CLI%20Backends-Claude%20%7C%20Codex%20%7C%20Grok-informational)
+![Harness](https://img.shields.io/badge/Harness-Rust%20%7C%20tokio%20%7C%20axum-e6b673)
+![Agents](https://img.shields.io/badge/MD%20Agents-249-red)
+![Models](https://img.shields.io/badge/Models-12%20providers%20%2F%2040%2B-success)
+![Backends](https://img.shields.io/badge/Subscription-Claude%20%7C%20Codex%20%7C%20Grok%20%7C%20Gemini-informational)
 ![MCP](https://img.shields.io/badge/MCP-Playwright-orange)
 
-**Autonomous, markdown-driven AI penetration testing.**
+**Autonomous, markdown-driven AI penetration testing — now with a Rust multi-model harness.**
 
-NeuroSploit v3.3.0 is a ground-up re-model of the pentest agent. Instead of a
-monolithic Python orchestrator, it is now a **lean engine that turns a URL into
-an autonomous engagement**: it composes a master prompt from a curated library
-of **213 markdown agents** and hands execution to whichever **agentic CLI
-backend** you have installed — **Claude Code, Codex, or Grok CLI** (or a Claude
-subscription) — augmented with **Playwright MCP** for real browser-based proof,
-and a **reinforcement-learning** loop that gets smarter every run.
+NeuroSploit turns a URL (or a code repository) into an autonomous security
+engagement. A high-performance **Rust harness** (`tokio` + `axum`) drives a
+**pool of LLM models** with concurrency, **provider failover**, and **N-model
+validator voting** — multiple models must independently agree a finding is real
+before it is reported. After recon, the harness **intelligently selects** which
+of the **249 markdown agents** match the target instead of running them blindly,
+learns across runs via a **reinforcement-learning** reward loop, and serves its
+own polished web dashboard.
 
-> The previous Python orchestration now lives in [`legacy/`](legacy/README.md).
+> The Python engine (v3.3.0) and the original monolith live in
+> [`legacy/`](legacy/README.md); the v3.3.0 stdlib dashboard remains in `webgui/`.
 
-> **🦀 v3.4.0 — Rust multi-model harness.** A new high-performance harness lives
-> in [`neurosploit-rs/`](neurosploit-rs/): a single Rust binary (`tokio` + `axum`)
-> that drives a **pool of LLM models** with concurrency, **provider failover**,
-> and **N-model validator voting** (N models must agree a finding is real before
-> it counts). It serves its own solid web dashboard. Build & run:
-> ```bash
-> cd neurosploit-rs && cargo build --release
-> ./target/release/neurosploit serve            # web dashboard → :8788
-> ./target/release/neurosploit run https://target.example --model anthropic:claude-opus-4-8 --model openai:gpt-5.1
-> ./target/release/neurosploit run https://t.example --offline   # pipeline self-test, no API keys
-> ./target/release/neurosploit run https://t.example --subscription --model anthropic:claude-opus-4-8  # uses Claude Code login, no API key
-> ```
-> Two auth paths: **model APIs** (provider key) or **subscription** — drive your
-> local **Claude Code** / **Codex** / **Grok** logins directly (no API key).
-> 11 OpenAI-compatible providers / 31 models (Claude, GPT, Grok, NVIDIA NIM,
-> DeepSeek, Mistral, Qwen, Groq, Together, OpenRouter, Ollama). Reads the same
-> `agents_md/` library (213 agents).
+## 🦀 The Rust harness (`neurosploit-rs/`)
+
+```bash
+cd neurosploit-rs && cargo build --release
+
+# Web dashboard (black-box + white-box modes)
+./target/release/neurosploit serve                       # → http://127.0.0.1:8788
+
+# Black-box: recon → intelligent agent selection → parallel exploit → vote → report
+./target/release/neurosploit run https://target.example \
+    --model anthropic:claude-opus-4-8 --model openai:gpt-5.1 --vote-n 3
+
+# White-box: analyse a repository's source for vulnerabilities
+./target/release/neurosploit whitebox /path/to/repo --subscription --model anthropic:claude-opus-4-8
+
+# Subscription (no API key) + real browser proof via Playwright MCP
+./target/release/neurosploit run https://t.example --subscription --mcp --model anthropic:claude-opus-4-8
+
+# Pipeline self-test, no keys/login required
+./target/release/neurosploit run https://t.example --offline
+```
+
+**What it does**
+
+- **Two modes** — *black-box* (URL recon → exploit) and *white-box* (walk a repo,
+  run code-review/SAST agents on the source).
+- **Intelligent selection** — the model picks the agents whose preconditions match
+  the recon, then runs that subset (not top-N).
+- **Multi-model pool** — bounded concurrency, **provider failover**, and the same
+  panel forms the **N-model validator jury** that cuts false positives.
+- **Two auth paths** — **model APIs** (provider key) *or* **subscription**: drive
+  your local **Claude Code / Codex / Grok / Gemini** logins directly, no API key.
+- **12 providers / 40+ models** (Claude, GPT, Grok, **Gemini**, NVIDIA NIM,
+  DeepSeek, Mistral, Qwen, Groq, Together, OpenRouter, Ollama).
+- **RL rewards** persisted to `data/rl_state_rs.json` — validated findings reward
+  an agent, biasing the next run.
+- **Artifacts for reuse** — every run writes `runs/<target>-<ts>/`:
+  `recon.json/md`, `exploitation.md`, `findings.json/md`, `report.html`.
+- **Playwright MCP** on the subscription path for real browser-based proof.
+
+### Agent library — 249 agents
+
+| Category | Dir | Count | Purpose |
+|----------|-----|-------|---------|
+| Vulnerability specialists | `agents_md/vulns/` | 196 | Exploit a specific vuln class |
+| Recon | `agents_md/recon/` | 12 | Information gathering / attack surface |
+| Code (white-box SAST) | `agents_md/code/` | 24 | Source-code vulnerability review |
+| Meta | `agents_md/meta/` | 17 | Orchestrator, validator, scorers, reporter, RL |
 
 ---
 
