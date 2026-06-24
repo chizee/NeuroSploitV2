@@ -116,6 +116,61 @@ impl Creds {
     }
 }
 
+/// Perform the login flow now (real HTTP POST) and return an auth header to
+/// reuse on every subsequent request: a `Cookie:` from Set-Cookie, or an
+/// `Authorization: Bearer` from a token in the JSON response. Returns
+/// (auth_header, note). Redirects are not followed so the login response's
+/// Set-Cookie is visible.
+pub async fn login(l: &Login) -> anyhow::Result<(String, String)> {
+    use reqwest::header::SET_COOKIE;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let form: Vec<(String, String)> = vec![
+        (l.username_field.clone(), l.username.clone()),
+        (l.password_field.clone(), l.password.clone()),
+    ];
+    let req = if l.method == "GET" {
+        client.get(&l.url).query(&form)
+    } else {
+        client.post(&l.url).form(&form)
+    };
+    let resp = req.send().await?;
+    let status = resp.status();
+
+    // 1) session cookies from Set-Cookie on the login response
+    let mut cookie_pairs = Vec::new();
+    for hv in resp.headers().get_all(SET_COOKIE) {
+        if let Ok(s) = hv.to_str() {
+            if let Some(pair) = s.split(';').next() {
+                let p = pair.trim();
+                if !p.is_empty() {
+                    cookie_pairs.push(p.to_string());
+                }
+            }
+        }
+    }
+    let body = resp.text().await.unwrap_or_default();
+
+    // 2) bearer token from a JSON response body
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        for k in ["access_token", "token", "jwt", "id_token", "accessToken"] {
+            if let Some(t) = v.get(k).and_then(|x| x.as_str()).filter(|t| !t.is_empty()) {
+                return Ok((format!("Authorization: Bearer {t}"), format!("bearer token from JSON `{k}` (HTTP {status})")));
+            }
+        }
+    }
+    if !cookie_pairs.is_empty() {
+        let cookie = cookie_pairs.join("; ");
+        // Soft success check (don't fail hard — many apps 302 on success).
+        let ok = l.success.is_empty() || body.contains(&l.success) || status.is_redirection() || status.is_success();
+        let note = format!("session cookie captured (HTTP {status}{})", if ok { "" } else { ", success marker not seen" });
+        return Ok((format!("Cookie: {cookie}"), note));
+    }
+    anyhow::bail!("login returned no Set-Cookie or token (HTTP {status})")
+}
+
 fn unquote(s: &str) -> String {
     let s = s.trim();
     if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)

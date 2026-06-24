@@ -184,7 +184,7 @@ async fn run(base: &Path, s: &Session) {
     if let M::Grey { repo, .. } = &m {
         cfg.repo = Some(repo.clone());
     }
-    crate::apply_creds(&mut cfg, s.creds.as_deref());
+    crate::apply_creds(&mut cfg, s.creds.as_deref()).await;
 
     let result = match m {
         M::Grey { .. } => crate::run_greybox_engagement(base, cfg, s.mcp).await,

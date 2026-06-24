@@ -54,6 +54,12 @@ enum Cmd {
         /// support MCP fall back to their built-in tools).
         #[arg(long)]
         mcp: bool,
+        /// Credentials YAML for authenticated testing (jwt/header/cookie/login).
+        #[arg(long)]
+        creds: Option<String>,
+        /// Free-text focus, e.g. "injection and broken access control".
+        #[arg(long)]
+        focus: Option<String>,
         /// Verbose: log each agent as it launches, recon, and votes.
         #[arg(short, long)]
         verbose: bool,
@@ -162,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Cmd::Run { url, models, max_agents, vote_n, offline, subscription, mcp, verbose } => {
+        Cmd::Run { url, models, max_agents, vote_n, offline, subscription, mcp, creds, focus, verbose } => {
             let url = if url.starts_with("http") { url } else { format!("https://{url}") };
             let mut cfg = RunConfig::new(&url);
             cfg.max_agents = max_agents;
@@ -170,9 +176,11 @@ async fn main() -> anyhow::Result<()> {
             cfg.offline = offline;
             cfg.subscription = subscription;
             cfg.verbose = verbose;
+            cfg.instructions = focus;
             if !models.is_empty() {
                 cfg.models = models;
             }
+            apply_creds(&mut cfg, creds.as_deref()).await;
             let out = run_engagement(&base, cfg, mcp, false).await?;
             print_findings(&out);
         }
@@ -202,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
             if !models.is_empty() {
                 cfg.models = models;
             }
-            apply_creds(&mut cfg, creds.as_deref());
+            apply_creds(&mut cfg, creds.as_deref()).await;
             let out = run_greybox_engagement(&base, cfg, mcp).await?;
             print_findings(&out);
         }
@@ -210,22 +218,38 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load a creds.yaml into the run config: derive the auth header and prepend any
-/// login flow to the operator instructions.
-pub(crate) fn apply_creds(cfg: &mut RunConfig, path: Option<&str>) {
+/// Load a creds.yaml into the run config. Direct material (jwt/header/cookie) is
+/// used as-is; a `login:` flow is EXECUTED now (real HTTP) to capture a live
+/// session cookie/token. If the auto-login fails, fall back to instructing the
+/// agents to authenticate themselves.
+pub(crate) async fn apply_creds(cfg: &mut RunConfig, path: Option<&str>) {
     let Some(p) = path else { return };
-    match harness::creds::Creds::load(Path::new(p)) {
-        Some(c) => {
-            if cfg.auth.is_none() {
-                cfg.auth = c.auth_header();
+    let Some(c) = harness::creds::Creds::load(Path::new(p)) else {
+        eprintln!("  [!] no usable credentials in {p}");
+        return;
+    };
+    println!("  [*] loaded credentials from {p}");
+    if cfg.auth.is_none() {
+        cfg.auth = c.auth_header();
+    }
+    // No direct material but a login flow → perform it now.
+    if cfg.auth.is_none() {
+        if let Some(login) = &c.login {
+            println!("  [*] auto-login: {} {} ...", login.method, login.url);
+            match harness::creds::login(login).await {
+                Ok((auth, note)) => {
+                    println!("  [*] authenticated — {note}");
+                    cfg.auth = Some(auth);
+                }
+                Err(e) => {
+                    eprintln!("  [!] auto-login failed ({e}); agents will attempt to log in themselves");
+                    if let Some(instr) = c.login_instruction() {
+                        let base = cfg.instructions.clone().unwrap_or_default();
+                        cfg.instructions = Some(format!("{instr}\n{base}"));
+                    }
+                }
             }
-            if let Some(login) = c.login_instruction() {
-                let base = cfg.instructions.clone().unwrap_or_default();
-                cfg.instructions = Some(format!("{login}\n{base}"));
-            }
-            println!("  [*] loaded credentials from {p}");
         }
-        None => eprintln!("  [!] no usable credentials in {p}"),
     }
 }
 
