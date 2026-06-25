@@ -13,7 +13,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::history::FileHistory;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::{Config, Context, Editor, Helper};
+use rustyline::{CompletionType, Config, Context, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::path::Path;
@@ -23,7 +23,7 @@ const COMMANDS: &[&str] = &[
     "/help", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
     "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
     "/votes", "/agents", "/theme", "/clear", "/run", "/runs", "/results", "/report",
-    "/status", "/quit",
+    "/status", "/diff", "/retest", "/quit",
 ];
 
 /// rustyline helper: Tab-completes `/commands` and `@filesystem-paths`,
@@ -141,7 +141,9 @@ enum Reader {
 impl Reader {
     fn new(_base: &Path) -> Reader {
         if std::io::stdin().is_terminal() {
-            let cfg = Config::builder().auto_add_history(false).build();
+            // List completion → @path shows a file/folder menu (Claude-Code-style).
+            let cfg = Config::builder().auto_add_history(false)
+                .completion_type(CompletionType::List).build();
             if let Ok(mut ed) = Editor::<NsHelper, FileHistory>::with_config(cfg) {
                 ed.set_helper(Some(NsHelper));
                 let hist = proj_dir().join("history.txt");
@@ -284,6 +286,18 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
             "/clear" => { print!("\x1b[2J\x1b[H"); }
             "/run" | "/go" => { save_session(&s); run(base, &s, &mut history).await; save_runs(base, &history); }
             "/runs" | "/history" => list_runs(&history),
+            "/diff" | "/changed" => diff_runs(&history),
+            "/retest" => {
+                if let Some(r) = pick(&history, arg) {
+                    if r.target.starts_with('/') { s.repo = Some(r.target.clone()); s.target = None; }
+                    else { s.target = Some(r.target.clone()); }
+                    let titles: Vec<String> = r.findings.iter().map(|f| f.title.clone()).collect();
+                    if !titles.is_empty() {
+                        s.instructions = Some(format!("RETEST — re-verify whether these prior findings are now fixed: {}", titles.join("; ")));
+                    }
+                    println!("  ↻ retest set up for {} ({} prior finding(s)) — /run to launch", r.target, titles.len());
+                }
+            }
             "/results" => results(&history, arg),
             "/report" => open_report(&history, arg),
             "/status" => run_status(&history, arg),
@@ -532,6 +546,22 @@ fn open_report(history: &[RunRecord], arg: &str) {
     }
 }
 
+/// What changed between the last two runs (by finding title).
+fn diff_runs(history: &[RunRecord]) {
+    if history.len() < 2 {
+        println!("  need at least 2 runs to diff (/runs).");
+        return;
+    }
+    let prev = &history[history.len() - 2];
+    let cur = &history[history.len() - 1];
+    let set = |r: &RunRecord| r.findings.iter().map(|f| f.title.clone()).collect::<std::collections::HashSet<_>>();
+    let (a, b) = (set(prev), set(cur));
+    println!("  ── what changed: run #{} → #{} ({} → {}) ──", prev.id, cur.id, prev.findings.len(), cur.findings.len());
+    for t in b.difference(&a) { println!("  \x1b[32m+ new\x1b[0m   {t}"); }
+    for t in a.difference(&b) { println!("  \x1b[31m- gone\x1b[0m  {t}"); }
+    if a == b { println!("  (no change in finding titles)"); }
+}
+
 fn run_status(history: &[RunRecord], arg: &str) {
     let Some(r) = pick(history, arg) else { return };
     match std::fs::read_to_string(Path::new(&r.workdir).join("status.json")) {
@@ -577,6 +607,7 @@ fn help() {
     println!("    /theme color|mono   /config (=/show)   /votes <n>   /agents <n>");
     println!("    Tab completes commands & @paths · ↑/↓ history · end a line with \\ for multiline");
     println!("    /run                launch   ·   /runs   /results [n]   /report [n]   /status [n]");
+    println!("    /diff               what changed vs the previous run   ·   /retest [n]  re-verify a past run");
     println!("    /quit               exit");
 }
 
