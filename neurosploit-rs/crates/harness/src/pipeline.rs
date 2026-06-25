@@ -181,6 +181,10 @@ pub async fn run(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Sender<Str
                     Ok((m, text)) => {
                         let f = extract_findings(&text, &ag.name);
                         let _ = txc.send(format!("exploit {} via {} → {} candidate(s)", ag.name, m.label(), f.len())).await;
+                        // Live findings feed: surface each candidate the moment it appears.
+                        for c in &f {
+                            let _ = txc.send(format!("finding: [{}] {} @ {}", c.severity, c.title, c.endpoint)).await;
+                        }
                         (ag.name.clone(), text, f)
                     }
                     Err(e) => {
@@ -647,7 +651,16 @@ async fn finish(cfg: RunConfig, _lib: &Library, recon: String, transcript: Strin
 
     let artifacts = persist(&cfg, &recon, &transcript, &findings);
     if !artifacts.is_empty() {
+        let _ = tx.send(format!("notify: evidence saved → {}", cfg.workdir.clone().unwrap_or_default())).await;
         let _ = tx.send(format!("artifacts saved: {}", artifacts.join(", "))).await;
+    }
+    // Automatic partial summary (phase complete).
+    {
+        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+        for f in &findings { *by.entry(f.severity.as_str()).or_insert(0) += 1; }
+        let sev = if by.is_empty() { "none".to_string() }
+                  else { by.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" ") };
+        let _ = tx.send(format!("notify: phase complete — {} validated finding(s) [{}]", findings.len(), sev)).await;
     }
 
     RunOutput {

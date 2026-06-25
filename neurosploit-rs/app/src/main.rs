@@ -437,10 +437,12 @@ fn render_line(raw: &str) {
         }
     }
     let (tag, rest) = match line.split_once(": ") {
-        Some((t, r)) if matches!(t, "exec" | "danger" | "read" | "edit" | "tool" | "net" | "ai" | "plan" | "tokens") => (t, r),
+        Some((t, r)) if matches!(t, "exec" | "danger" | "read" | "edit" | "tool" | "net" | "ai" | "plan" | "tokens" | "notify" | "finding") => (t, r),
         _ => ("", line),
     };
     match tag {
+        "notify" => println!("  \x1b[1;36m🔔 {}\x1b[0m", rest.trim()),
+        "finding" => println!("  \x1b[1;33m✦ possible finding\x1b[0m {who}{}", rest.trim()),
         "exec" => card(&format!("{who}⌘ command"), rest, "\x1b[33m"),
         "danger" => card(&format!("{who}⚠ DANGEROUS command"), rest, "\x1b[1;31m"),
         "read" => state("📄", "reading", &format!("{who}{rest}"), "\x1b[34m"),
