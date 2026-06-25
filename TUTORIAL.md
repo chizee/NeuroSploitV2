@@ -305,10 +305,26 @@ prompt — you keep typing while it streams live above the prompt. While it runs
 
 - **`/status`** — live phase, a **progress bar** (agents done / total), elapsed
   time, token/cost and the possible findings so far.
-- **`/stop`** — gracefully stop (a report is still generated from partial results).
+- **`/stop`** — stop with a 3-way choice: **[1]** validate the findings found so
+  far, then report · **[2]** raw report **now** without validating · **[3]**
+  discard. Choices 2 and 3 abort in-flight agents immediately (running commands
+  are killed); choice 1 stops launching new agents but lets validation finish.
 - Findings are color-coded by severity (Critical = red … Info = grey), and a
   confirmed vote shows green ✓.
 - When it finishes you get `◀ run #n done — N validated finding(s) · /results n · /report n`.
+
+**Findings survive a crash/quit.** Every finding is checkpointed live to
+`.neurosploit/active_run.json`. If the REPL is closed (or crashes) mid-run, the
+next launch recovers them into `/runs` automatically (`↻ recovered interrupted
+run …`), so `/results`, `/finding` and `/report` still work.
+
+**If your tokens/quota run out, the run pauses instead of dying.** When every
+candidate model is rate-limited/out of quota, the run **parks** (keeping all
+state) and prints `⏸ token/quota exhausted … PAUSED`. Then either:
+
+- wait for your quota to renew and type **`/continue`** to retry the same model, or
+- switch model first — **`/model <provider:model>`** (or `/model` for the
+  arrow-select menu) — then **`/continue`** to resume on the new model.
 
 (When stdin is piped/non-interactive, `/run` falls back to blocking mode.)
 
@@ -416,13 +432,16 @@ When you launch the REPL in a project directory, NeuroSploit creates
 
 ```
 .neurosploit/
-  session.json   # your config (models, target, repo, auth, focus)
-  runs.json      # run history (for /runs, /results, /report, /diff, /retest)
-  history.txt    # command history (↑/↓)
+  session.json     # your config (models, target, repo, auth, focus)
+  runs.json        # run history (for /runs, /results, /report, /diff, /retest)
+  active_run.json  # live checkpoint of an in-flight run (auto-recovered if interrupted)
+  history.txt      # command history (↑/↓)
 ```
 
 Close and reopen in the same folder → it **resumes** automatically
-(`↻ resumed project session`). No database needed — it's structured state.
+(`↻ resumed project session`). If a run was interrupted mid-flight, its
+checkpointed findings are recovered into `/runs` (`↻ recovered interrupted run`).
+No database needed — it's structured state.
 
 ---
 

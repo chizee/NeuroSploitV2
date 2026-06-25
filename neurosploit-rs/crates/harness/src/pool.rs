@@ -1,7 +1,24 @@
 use crate::models::{cli_binary_for, ChatClient, ModelRef};
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{Notify, Semaphore};
+
+/// Does this error look like token/quota/rate-limit exhaustion (as opposed to a
+/// transient network blip)? Used to PAUSE the run instead of silently dropping
+/// the agent, so the user can /continue (wait for renewal) or switch model.
+pub fn is_exhaustion(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    [
+        "rate limit", "rate_limit", "ratelimit", "429", "too many requests",
+        "quota", "insufficient_quota", "insufficient quota", "out of credit",
+        "credit balance", "billing", "exhausted", "overloaded", "capacity",
+        "usage limit", "resource_exhausted", "resource exhausted",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
+}
 
 /// Task type used by the model router to pick the best model for the step.
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +56,14 @@ pub struct ModelPool {
     /// SOFT stop: stop launching new EXPLOIT agents, but let in-flight finish and
     /// VALIDATION still run — so "stop and validate what was found" works.
     soft: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// PAUSE: set when every candidate model is token/quota-exhausted. The run
+    /// parks (keeping all state) until the user runs /continue.
+    paused: Arc<AtomicBool>,
+    /// Wakes the parked task when the user runs /continue.
+    resume: Arc<Notify>,
+    /// Fallback models the user added via `/continue <provider:model>` while
+    /// paused — tried first on the next attempt.
+    fallback: Arc<Mutex<Vec<ModelRef>>>,
 }
 
 impl ModelPool {
@@ -68,6 +93,9 @@ impl ModelPool {
             progress: std::sync::Mutex::new(None),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             soft: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume: Arc::new(Notify::new()),
+            fallback: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -101,6 +129,52 @@ impl ModelPool {
             || self.soft.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Handle to the PAUSE flag (observe whether the run is parked on exhaustion).
+    pub fn pause_handle(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
+    }
+    /// Handle used by the REPL to wake a parked run (`/continue`).
+    pub fn resume_handle(&self) -> Arc<Notify> {
+        self.resume.clone()
+    }
+    /// Slot the REPL pushes a fallback model into before resuming
+    /// (`/continue <provider:model>`).
+    pub fn fallback_handle(&self) -> Arc<Mutex<Vec<ModelRef>>> {
+        self.fallback.clone()
+    }
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Park the run on token/quota exhaustion: keep ALL state, emit a notice,
+    /// and wait until the user runs `/continue` (or cancels). Returns when the
+    /// run should retry (pause cleared) or give up (cancelled).
+    async fn park_exhausted(&self, err: &anyhow::Error) {
+        self.paused.store(true, Ordering::Relaxed);
+        if let Some(tx) = self.progress() {
+            let msg = format!("{err:#}");
+            let short = msg.lines().next().unwrap_or(&msg);
+            let _ = tx
+                .send(format!(
+                    "notify: ⏸ token/quota exhausted ({}). Run is PAUSED — type /continue when your quota renews, or switch with /model <provider:model> then /continue.",
+                    short.chars().take(120).collect::<String>()
+                ))
+                .await;
+        }
+        while self.paused.load(Ordering::Relaxed) && !self.is_cancelled() {
+            let notified = self.resume.notified();
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+        if !self.is_cancelled() {
+            if let Some(tx) = self.progress() {
+                let _ = tx.send("notify: ▶ resumed — retrying exhausted step.".to_string()).await;
+            }
+        }
+    }
+
     /// One completion for a model, via subscription CLI (optionally with MCP) or
     /// HTTP API, with a short retry/backoff. `label` (e.g. the agent name) tags
     /// the streamed activity so each command/tool is attributable.
@@ -112,18 +186,35 @@ impl ModelPool {
         let progress = self.progress();
         let mut last = anyhow::anyhow!("no attempt");
         for attempt in 0..3u64 {
+            if self.is_cancelled() {
+                return Err(anyhow!("cancelled"));
+            }
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt * attempt.max(1))).await;
             }
-            let r = if use_cli {
-                self.client
-                    .chat_cli(label, &m.provider, &m.model, system, user, self.mcp_config.as_deref(), progress.clone())
-                    .await
-            } else {
-                self.client.chat(m, system, user).await
+            let call = async {
+                if use_cli {
+                    self.client
+                        .chat_cli(label, &m.provider, &m.model, system, user, self.mcp_config.as_deref(), progress.clone())
+                        .await
+                } else {
+                    self.client.chat(m, system, user).await
+                }
+            };
+            // Race the in-flight call against a HARD cancel: when the user picks
+            // "report raw" / "discard" on /stop, drop the call future so the
+            // CLI child (spawned with kill_on_drop) is terminated immediately
+            // instead of finishing its whole command sequence.
+            let r = tokio::select! {
+                biased;
+                _ = wait_cancelled(&self.cancel) => return Err(anyhow!("cancelled")),
+                r = call => r,
             };
             match r {
                 Ok(t) => return Ok(t),
+                // Don't burn retries on exhaustion — surface it so the caller
+                // can park and let the user /continue.
+                Err(e) if is_exhaustion(&e) => return Err(e),
                 Err(e) => last = e,
             }
         }
@@ -138,15 +229,44 @@ impl ModelPool {
     /// Router-aware completion. `label` tags streamed activity (agent name).
     pub async fn complete_routed(&self, task: Task, label: &str, system: &str, user: &str) -> Result<(ModelRef, String)> {
         let _permit = self.sem.acquire().await.expect("semaphore closed");
-        let order = self.route(task);
-        let mut last = anyhow!("no candidate models");
-        for m in &order {
-            match self.one(label, m, system, user).await {
-                Ok(text) => return Ok((m.clone(), text)),
-                Err(e) => last = e,
+        loop {
+            if self.is_cancelled() {
+                return Err(anyhow!("cancelled"));
             }
+            // User-supplied fallback models (via /continue) are tried first.
+            let mut order = self.route(task);
+            if let Ok(fb) = self.fallback.lock() {
+                for m in fb.iter().rev() {
+                    if !order.iter().any(|o| o.provider == m.provider && o.model == m.model) {
+                        order.insert(0, m.clone());
+                    }
+                }
+            }
+            let mut last = anyhow!("no candidate models");
+            let mut exhausted = false;
+            for m in &order {
+                if self.is_cancelled() {
+                    return Err(anyhow!("cancelled"));
+                }
+                match self.one(label, m, system, user).await {
+                    Ok(text) => return Ok((m.clone(), text)),
+                    Err(e) => {
+                        if is_exhaustion(&e) {
+                            exhausted = true;
+                        }
+                        last = e;
+                    }
+                }
+            }
+            // Every candidate failed. If it was token/quota exhaustion, park the
+            // run until the user runs /continue, then retry the whole order (now
+            // including any fallback model they added). Otherwise, give up.
+            if exhausted && !self.is_cancelled() {
+                self.park_exhausted(&last).await;
+                continue;
+            }
+            return Err(last);
         }
-        Err(last)
     }
 
     /// Reorder candidates for a task. With a single-model panel this is a no-op.
@@ -203,5 +323,13 @@ impl ModelPool {
             }
         }
         (confirmed, total)
+    }
+}
+
+/// Resolve once the HARD-cancel flag flips. Lets `tokio::select!` race an
+/// in-flight model call against cancellation and drop it on the spot.
+async fn wait_cancelled(flag: &Arc<AtomicBool>) {
+    while !flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(120)).await;
     }
 }

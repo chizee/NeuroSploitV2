@@ -360,6 +360,12 @@ pub(crate) struct Spawned {
     pub rx: tokio::sync::mpsc::Receiver<String>,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub soft: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set when the run is parked on token/quota exhaustion (awaiting /continue).
+    pub paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Wakes a parked run when the user runs /continue.
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
+    /// Fallback models pushed by /continue <provider:model> before resuming.
+    pub fallback: std::sync::Arc<std::sync::Mutex<Vec<ModelRef>>>,
     pub workdir: PathBuf,
 }
 
@@ -410,6 +416,9 @@ pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode:
     let pool = ModelPool::with_auth(refs, cfg.concurrency, cfg.subscription, mcp_config);
     let cancel = pool.cancel_handle();
     let soft = pool.soft_handle();
+    let paused = pool.pause_handle();
+    let resume = pool.resume_handle();
+    let fallback = pool.fallback_handle();
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
     let task = tokio::spawn(async move {
         match mode {
@@ -419,7 +428,7 @@ pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode:
             Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
         }
     });
-    Spawned { task, rx, cancel, soft, workdir }
+    Spawned { task, rx, cancel, soft, paused, resume, fallback, workdir }
 }
 
 /// Absolute file:// URL of a run's report (PDF if present, else HTML).

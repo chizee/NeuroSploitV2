@@ -6,7 +6,7 @@
 //! models, target/repo/auth/instructions, run history, and reports.
 
 use dialoguer::{theme::ColorfulTheme, MultiSelect};
-use harness::{agents, types::Finding, types::RunConfig};
+use harness::{agents, models::ModelRef, types::Finding, types::RunConfig};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -48,7 +48,9 @@ impl RunLive {
     }
     fn ingest(&mut self, line: &str) {
         let low = line.to_lowercase();
-        if low.contains("recon complete") { self.phase = "recon".into(); }
+        if low.contains("token/quota exhausted") || low.contains("run is paused") { self.phase = "paused (quota)".into(); }
+        else if low.contains("resumed — retrying") { self.phase = "exploiting".into(); }
+        else if low.contains("recon complete") { self.phase = "recon".into(); }
         else if low.contains("selected") && low.contains("agent") {
             self.phase = "planning".into();
             if let Some(n) = line.split_whitespace().find_map(|t| t.parse::<usize>().ok()) { self.agents = n; }
@@ -93,13 +95,31 @@ struct ActiveRun {
     soft: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     choice: Arc<Mutex<StopMode>>,
+    /// Set when the run is parked on token/quota exhaustion (awaiting /continue).
+    paused: Arc<AtomicBool>,
+    /// Wakes the parked run when the user runs /continue.
+    resume: Arc<tokio::sync::Notify>,
+    /// Fallback models to try first, pushed by /continue <provider:model>.
+    fallback: Arc<Mutex<Vec<ModelRef>>>,
+}
+
+/// On-disk checkpoint of an in-flight run's findings/commands, written live so a
+/// run survives quitting/crashing — recovered into /runs on the next launch.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct LiveCheckpoint {
+    target: String,
+    mode: String,
+    phase: String,
+    workdir: String,
+    findings: Vec<Finding>,
+    commands: Vec<String>,
 }
 
 /// All slash-commands, for Tab completion.
 const COMMANDS: &[&str] = &[
     "/help", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
     "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
-    "/votes", "/agents", "/theme", "/clear", "/run", "/stop", "/runs", "/results", "/report",
+    "/votes", "/agents", "/theme", "/clear", "/run", "/stop", "/continue", "/runs", "/results", "/report",
     "/status", "/diff", "/retest", "/quit",
 ];
 
@@ -294,8 +314,26 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     let history: Arc<Mutex<Vec<RunRecord>>> = Arc::new(Mutex::new(load_runs(base)));
     let past = history.lock().unwrap().len();
     if resumed || past > 0 {
-        println!("  ↻ resumed project session from {} — {} past run(s)\n", proj_dir().display(), past);
+        println!("  ↻ resumed project session from {} — {} past run(s)", proj_dir().display(), past);
     }
+    // Recover an interrupted run (REPL was quit/crashed mid-engagement): its
+    // live findings were checkpointed to disk — fold them into /runs so
+    // /results, /finding and /report still work.
+    if let Some(cp) = load_checkpoint() {
+        if !cp.findings.is_empty() {
+            let wd = std::path::PathBuf::from(&cp.workdir);
+            std::fs::create_dir_all(&wd).ok();
+            crate::report_raw(&cp.target, &cp.findings, &wd); // materialize a report so /report works
+            let mut h = history.lock().unwrap();
+            let id = h.len() + 1;
+            h.push(RunRecord { id, mode: cp.mode.clone(), target: cp.target.clone(), workdir: cp.workdir.clone(), findings: cp.findings.clone() });
+            save_runs(base, &h);
+            println!("  \x1b[1;33m↻ recovered interrupted run on {} — {} finding(s) saved as run #{}\x1b[0m (/results {id} · /report {id})",
+                cp.target, cp.findings.len(), id);
+        }
+        clear_checkpoint();
+    }
+    println!();
     let mut reader = Reader::new(base);
     let mut active: Option<ActiveRun> = None;
     show(&s);
@@ -331,6 +369,15 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                 } else {
                     s.models = arg.split([',', ' ']).filter(|x| !x.is_empty()).map(String::from).collect();
                     println!("  models: {}", s.models.join(", "));
+                }
+                // If a run is paused on exhaustion, queue the newly-chosen models
+                // as its fallback so a plain /continue picks them up.
+                if let Some(a) = &active {
+                    if a.paused.load(Ordering::Relaxed) {
+                        let mut fb = a.fallback.lock().unwrap();
+                        for id in &s.models { fb.push(ModelRef::parse(id)); }
+                        println!("  \x1b[2m↪ queued for the paused run — /continue to resume on these model(s)\x1b[0m");
+                    }
                 }
             }
             "/key" => key_cmd(&mut s, arg, &mut reader),
@@ -414,6 +461,23 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                     _ => println!("  no active run."),
                 }
             }
+            "/continue" | "/resume" => {
+                match &active {
+                    Some(a) if a.paused.load(Ordering::Relaxed) => {
+                        if !arg.is_empty() {
+                            let m = ModelRef::parse(arg);
+                            println!("  \x1b[1;35m▶ resuming with fallback model\x1b[0m {}:{}", m.provider, m.model);
+                            a.fallback.lock().unwrap().push(m);
+                        } else {
+                            println!("  \x1b[1;35m▶ resuming\x1b[0m — retrying with the current model(s).");
+                        }
+                        a.paused.store(false, Ordering::Relaxed);
+                        a.resume.notify_waiters();
+                    }
+                    Some(a) if !a.done.load(Ordering::Relaxed) => println!("  run is not paused — it's still working. /status to check."),
+                    _ => println!("  no paused run. (a run pauses automatically if your tokens/quota run out)"),
+                }
+            }
             "/runs" | "/history" => list_runs(&history.lock().unwrap()),
             "/diff" | "/changed" => diff_runs(&history.lock().unwrap()),
             "/retest" => {
@@ -478,6 +542,9 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                         let sev = if by.is_empty() { "0".into() } else { by.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" ") };
                         println!("  \x1b[1m▶ live\x1b[0m {} ({}) · phase {} · {:02}:{:02} · {} possible finding(s) [{}]",
                             l.target, l.mode, l.phase, el / 60, el % 60, l.findings.len(), sev);
+                        if a.paused.load(Ordering::Relaxed) {
+                            println!("    \x1b[1;33m⏸ PAUSED — token/quota exhausted. /continue to resume, or /model <provider:model> then /continue to switch.\x1b[0m");
+                        }
                         if l.agents > 0 { println!("    progress \x1b[36m{}\x1b[0m", l.bar(24)); }
                         for (sv, t) in l.findings.iter().rev().take(5) { println!("    ✦ [{sv}] {t}"); }
                     }
@@ -661,21 +728,40 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
     }));
     let cancel = sp.cancel.clone();
     let soft = sp.soft.clone();
+    let paused = sp.paused.clone();
+    let resume = sp.resume.clone();
+    let fallback = sp.fallback.clone();
     let done = Arc::new(AtomicBool::new(false));
     let choice = Arc::new(Mutex::new(StopMode::Run));
     let (live2, done2, hist2, choice2) = (live.clone(), done.clone(), history, choice.clone());
 
     tokio::spawn(async move {
         let crate::Spawned { task, mut rx, workdir, .. } = sp;
+        let mut last_saved = 0usize;
         while let Some(line) = rx.recv().await {
             live2.lock().unwrap().ingest(&line);
             if let Some(out) = crate::render_compact(&line) { let _ = printer.print(out); }
+            // Checkpoint live findings to disk whenever a new one lands, so the
+            // run survives a quit/crash and is recovered on next launch.
+            let snap = {
+                let l = live2.lock().unwrap();
+                if l.full.len() != last_saved {
+                    last_saved = l.full.len();
+                    Some(LiveCheckpoint {
+                        target: l.target.clone(), mode: l.mode.into(), phase: l.phase.clone(),
+                        workdir: workdir.display().to_string(),
+                        findings: l.full.clone(), commands: l.commands.clone(),
+                    })
+                } else { None }
+            };
+            if let Some(c) = snap { save_checkpoint(&c); }
         }
         let task_out = task.await.unwrap_or_default();
         let mode_choice = *choice2.lock().unwrap();
 
         if mode_choice == StopMode::Discard {
             std::fs::remove_dir_all(&workdir).ok();
+            clear_checkpoint();
             let _ = printer.print(format!("\x1b[33m🗑 run discarded — {}\x1b[0m", workdir.display()));
             done2.store(true, Ordering::Relaxed);
             return;
@@ -698,13 +784,14 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
             if let Ok(j) = serde_json::to_string_pretty(&*h) { std::fs::write(proj_dir().join("runs.json"), j).ok(); }
             id
         };
+        clear_checkpoint(); // run is now a completed RunRecord
         let _ = printer.print(format!(
             "\x1b[1;32m◀ run #{id} done — {} {} finding(s)\x1b[0m · /results {id} · /finding",
             findings.len(), validated_word));
         let _ = printer.print(format!("\x1b[36m  report: {}\x1b[0m", crate::report_url(&workdir)));
         done2.store(true, Ordering::Relaxed);
     });
-    Some(ActiveRun { live, cancel, soft, done, choice })
+    Some(ActiveRun { live, cancel, soft, done, choice, paused, resume, fallback })
 }
 
 /// Project-local store: `<cwd>/.neurosploit/` so each project keeps its own
@@ -724,6 +811,16 @@ fn load_runs(_base: &Path) -> Vec<RunRecord> {
 fn save_runs(_base: &Path, history: &[RunRecord]) {
     let p = runs_path(_base);
     if let Ok(j) = serde_json::to_string_pretty(history) { std::fs::write(p, j).ok(); }
+}
+
+/// Live-run checkpoint file (one in-flight run at a time).
+fn checkpoint_path() -> std::path::PathBuf { proj_dir().join("active_run.json") }
+fn save_checkpoint(c: &LiveCheckpoint) {
+    if let Ok(j) = serde_json::to_string_pretty(c) { std::fs::write(checkpoint_path(), j).ok(); }
+}
+fn clear_checkpoint() { std::fs::remove_file(checkpoint_path()).ok(); }
+fn load_checkpoint() -> Option<LiveCheckpoint> {
+    std::fs::read_to_string(checkpoint_path()).ok().and_then(|t| serde_json::from_str(&t).ok())
 }
 
 /// Persistable snapshot of the session config (resume across restarts).
@@ -939,7 +1036,8 @@ fn help() {
     println!("\n  \x1b[2mRUN & MONITOR\x1b[0m");
     h("/run",               "launch (runs in the BACKGROUND — keep typing)");
     h("/status",            "live progress + findings while running (or a past run #)");
-    h("/stop",              "gracefully stop the active run");
+    h("/stop",              "stop: [1] validate+report  [2] raw report now  [3] discard");
+    h("/continue",          "resume a run paused on token/quota (change /model first to switch)");
     h("/runs",              "list runs · /results [n] · /report [n]");
     h("/diff /retest [n]",  "what changed vs last run · re-verify a past run");
 
@@ -949,6 +1047,8 @@ fn help() {
     h("/theme color|mono",  "/show (config)            /clear        /quit");
 
     println!("\n  \x1b[2mMODES — black-box: set /target · white-box: set /repo · grey-box: set BOTH /repo + /target · host: /target <ip> + /creds\x1b[0m");
+    println!("  \x1b[2mFindings are checkpointed live to .neurosploit/ — quit/crash mid-run and they're recovered into /runs next launch.\x1b[0m");
+    println!("  \x1b[2mIf tokens/quota run out the run PAUSES (state kept) — /continue to resume, or switch with /model then /continue.\x1b[0m");
     println!("  \x1b[2m↑/↓ history · Tab completes commands & @paths · Ctrl-A/E/K edit · Ctrl-O full cmd · \\ for multiline\x1b[0m\n");
 }
 
