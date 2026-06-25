@@ -31,12 +31,34 @@ pub struct Login {
     pub success: String,
 }
 
+/// SSH credentials for Linux host testing.
+#[derive(Default, Debug, Clone)]
+pub struct Ssh {
+    pub host: String,
+    pub port: String,   // default 22
+    pub user: String,
+    pub password: String,
+    pub key: String,    // path to a private key
+}
+
+/// Windows / Active Directory credentials.
+#[derive(Default, Debug, Clone)]
+pub struct Win {
+    pub host: String,
+    pub user: String,
+    pub password: String,
+    pub domain: String,
+    pub hash: String,   // NTLM hash for pass-the-hash (LM:NT or NT)
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Creds {
     pub jwt: Option<String>,
     pub header: Option<String>,
     pub cookie: Option<String>,
     pub login: Option<Login>,
+    pub ssh: Option<Ssh>,
+    pub win: Option<Win>,
 }
 
 impl Creds {
@@ -44,8 +66,10 @@ impl Creds {
         let text = std::fs::read_to_string(path).ok()?;
         let mut c = Creds::default();
         let mut login = Login { method: "POST".into(), ..Default::default() };
-        let mut in_login = false;
-        let mut have_login = false;
+        let mut ssh = Ssh { port: "22".into(), ..Default::default() };
+        let mut win = Win::default();
+        let (mut have_login, mut have_ssh, mut have_win) = (false, false, false);
+        let mut block = ""; // "", "login", "ssh", "windows"
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("");
             if line.trim().is_empty() {
@@ -56,25 +80,49 @@ impl Creds {
                 Some((k, v)) => (k.trim().to_string(), unquote(v.trim())),
                 None => continue,
             };
-            if k == "login" && v.is_empty() {
-                in_login = true;
-                have_login = true;
+            // Enter a nested block (header line with empty value).
+            if v.is_empty() && !indented {
+                block = match k.as_str() {
+                    "login" => { have_login = true; "login" }
+                    "ssh" => { have_ssh = true; "ssh" }
+                    "windows" | "win" | "ad" => { have_win = true; "windows" }
+                    _ => "",
+                };
                 continue;
             }
-            if in_login && indented {
-                match k.as_str() {
-                    "url" => login.url = v,
-                    "method" => login.method = v.to_uppercase(),
-                    "username_field" => login.username_field = v,
-                    "password_field" => login.password_field = v,
-                    "username" | "user" => login.username = v,
-                    "password" | "pass" => login.password = v,
-                    "success" => login.success = v,
+            if indented {
+                match block {
+                    "login" => match k.as_str() {
+                        "url" => login.url = v,
+                        "method" => login.method = v.to_uppercase(),
+                        "username_field" => login.username_field = v,
+                        "password_field" => login.password_field = v,
+                        "username" | "user" => login.username = v,
+                        "password" | "pass" => login.password = v,
+                        "success" => login.success = v,
+                        _ => {}
+                    },
+                    "ssh" => match k.as_str() {
+                        "host" | "ip" => ssh.host = v,
+                        "port" => ssh.port = v,
+                        "user" | "username" => ssh.user = v,
+                        "password" | "pass" => ssh.password = v,
+                        "key" | "keyfile" | "identity" => ssh.key = v,
+                        _ => {}
+                    },
+                    "windows" => match k.as_str() {
+                        "host" | "ip" => win.host = v,
+                        "user" | "username" => win.user = v,
+                        "password" | "pass" => win.password = v,
+                        "domain" => win.domain = v,
+                        "hash" | "ntlm" => win.hash = v,
+                        _ => {}
+                    },
                     _ => {}
                 }
                 continue;
             }
-            in_login = false;
+            block = "";
             match k.as_str() {
                 "jwt" | "token" => c.jwt = Some(v),
                 "header" => c.header = Some(v),
@@ -82,13 +130,35 @@ impl Creds {
                 _ => {}
             }
         }
-        if have_login && !login.url.is_empty() {
-            c.login = Some(login);
-        }
-        if c.jwt.is_none() && c.header.is_none() && c.cookie.is_none() && c.login.is_none() {
+        if have_login && !login.url.is_empty() { c.login = Some(login); }
+        if have_ssh && !ssh.host.is_empty() { c.ssh = Some(ssh); }
+        if have_win && !win.host.is_empty() { c.win = Some(win); }
+        if c.jwt.is_none() && c.header.is_none() && c.cookie.is_none()
+            && c.login.is_none() && c.ssh.is_none() && c.win.is_none() {
             return None;
         }
         Some(c)
+    }
+
+    /// A directive describing the host credentials available to the agents, so
+    /// they can authenticate to Linux (SSH) / Windows (AD) hosts.
+    pub fn host_instruction(&self) -> Option<String> {
+        let mut s = String::new();
+        if let Some(h) = &self.ssh {
+            let auth = if !h.key.is_empty() { format!("private key {}", h.key) } else { "password (provided)".into() };
+            s.push_str(&format!(
+                "SSH ACCESS (Linux): host {}:{} as user '{}' via {}. Use `ssh`/`sshpass` to run \
+                 enumeration and privilege-escalation checks on the host.\n",
+                h.host, h.port, h.user, auth));
+        }
+        if let Some(w) = &self.win {
+            let auth = if !w.hash.is_empty() { "NTLM hash (pass-the-hash)".to_string() } else { "password".into() };
+            s.push_str(&format!(
+                "WINDOWS/AD ACCESS: host {} domain '{}' as user '{}' via {}. Use tools like \
+                 crackmapexec/netexec, impacket, evil-winrm, bloodhound-python for host and AD checks.\n",
+                w.host, if w.domain.is_empty() { "(workgroup)" } else { &w.domain }, w.user, auth));
+        }
+        if s.is_empty() { None } else { Some(s) }
     }
 
     /// The auth material to send with each request, as a header line.

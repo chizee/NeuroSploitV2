@@ -148,7 +148,7 @@ pub async fn run(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> anyh
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(512);
     let models = cfg.models.join(", ");
-    let mode_s = match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Black => "black-box" };
+    let mode_s = match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Host => "host/infra", Mode::Black => "black-box" };
     let target_s = cfg.target.clone();
 
     // ---- terminal setup FIRST: on a non-TTY this errors before we spawn any
@@ -162,6 +162,7 @@ pub async fn run(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> anyh
         match mode {
             Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
             Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
+            Mode::Host => harness::run_host(cfg, &lib, &pool, tx).await,
             Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
         }
     });

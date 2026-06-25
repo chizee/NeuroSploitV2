@@ -131,8 +131,6 @@ impl Default for Session {
     }
 }
 
-const PROMPT: &str = "\x1b[35mneurosploit›\x1b[0m ";
-
 /// Line reader: full rustyline editing (Tab-complete, history, multiline) when
 /// interactive, plain stdin when piped.
 enum Reader {
@@ -157,9 +155,10 @@ impl Reader {
 
     /// Returns None to exit (EOF / Ctrl-D), Some(line) otherwise. Ctrl-C cancels
     /// the current line (returns an empty string) instead of exiting.
-    fn read(&mut self) -> Option<String> {
+    /// `prompt` is the dynamic context bar + prompt to show.
+    fn read(&mut self, prompt: &str) -> Option<String> {
         match self {
-            Reader::Rl(ed, hist) => match ed.readline(PROMPT) {
+            Reader::Rl(ed, hist) => match ed.readline(prompt) {
                 Ok(l) => {
                     // Join multiline input: a trailing `\` continued the line.
                     let l = l.replace("\\\n", " ").replace('\n', " ");
@@ -174,7 +173,7 @@ impl Reader {
             },
             Reader::Plain(stdin) => {
                 use std::io::Write;
-                print!("{PROMPT}");
+                print!("{prompt}");
                 std::io::stdout().flush().ok();
                 let mut s = String::new();
                 match stdin.read_line(&mut s) {
@@ -209,7 +208,7 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     show(&s);
 
     loop {
-        let Some(line) = reader.read() else { println!("\n  bye."); break };
+        let Some(line) = reader.read(&context_prompt(&s)) else { println!("\n  bye."); break };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -588,6 +587,27 @@ fn parse_range(r: &str) -> Option<(usize, usize)> {
         Some((a, b)) => Some((a.trim().parse().ok()?, b.trim().parse().ok()?)),
         None => { let n: usize = r.trim().parse().ok()?; Some((n, n)) }
     }
+}
+
+/// Context/status bar shown above the prompt — model · cwd · mode/target,
+/// e.g.  "claude-opus-4-8 · /opt/projeto · black-box▸target".
+fn context_prompt(s: &Session) -> String {
+    let model = s.models.first().map(|m| m.split(':').next_back().unwrap_or(m)).unwrap_or("?");
+    let auth = if s.subscription { "sub" } else { "api" };
+    let cwd = std::env::current_dir().ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".into());
+    let mode = match (&s.repo, &s.target) {
+        (Some(_), Some(_)) => "greybox",
+        (Some(_), None) => "white-box",
+        (None, Some(_)) => "black-box",
+        _ => "idle",
+    };
+    let tgt = s.target.clone().or_else(|| s.repo.clone()).unwrap_or_default();
+    let tgt = if tgt.is_empty() { String::new() } else { format!("▸{}", tgt.replace("https://", "").replace("http://", "")) };
+    format!(
+        "\x1b[2m{model} {auth} · {cwd} · {mode}{tgt}\x1b[0m\n\x1b[35mneurosploit›\x1b[0m "
+    )
 }
 
 fn onoff(b: bool) -> &'static str { if b { "on" } else { "off" } }

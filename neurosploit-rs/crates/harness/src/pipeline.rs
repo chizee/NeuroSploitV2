@@ -864,3 +864,98 @@ fn collect_repo_context(root: &Path, max_files: usize, max_bytes: usize) -> Stri
     }
     out
 }
+
+const HOST_RECON_SYS: &str = "You are an infrastructure recon specialist on an AUTHORIZED engagement against a HOST/IP. Actively scan with rustscan/nmap (and netexec/smbclient where relevant) to map open ports, services, versions and auth surfaces. Use any provided SSH/Windows credentials to enumerate from inside. Do not ask permission; proceed. Reply with a compact JSON object (host, os, ports, services, auth, ad). No prose.";
+
+const HOST_TOOLING: &str = "TOOLING (best on Kali): nmap/rustscan (ports), netexec/crackmapexec + smbclient (SMB/AD), ssh/sshpass + linpeas (Linux), evil-winrm + winPEAS + impacket (Windows), bloodhound-python/SharpHound (AD), hashcat (offline cracking). Use only supplied credentials; never brute force or run destructive/DoS actions.\n\n";
+
+/// Infrastructure engagement: scan/enumerate an IP/host and run Linux/Windows/AD
+/// agents. Mirrors the web pipeline but selects from the `infra` agent set.
+pub async fn run_host(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Sender<String>) -> RunOutput {
+    pool.set_progress(tx.clone());
+    let _ = tx.send(format!("HOST · target: {} · {} infra agents · models: {}", cfg.target, lib.infra.len(),
+        pool.candidates.iter().map(|m| m.label()).collect::<Vec<_>>().join(", "))).await;
+
+    let recon = if cfg.offline {
+        "{}".to_string()
+    } else {
+        let user = format!("{}{}Target host: {}", operator_directives(&cfg), HOST_TOOLING, cfg.target);
+        match pool.complete_routed(Task::Recon, "recon", HOST_RECON_SYS, &user).await {
+            Ok((m, t)) => { let _ = tx.send(format!("recon complete via {}", m.label())).await; t }
+            Err(e) => { let _ = tx.send(format!("recon failed ({e})")).await; "{}".to_string() }
+        }
+    };
+
+    let mut rl = cfg.rl_path.as_ref().map(|p| RlState::load(Path::new(p))).unwrap_or_default();
+    let mut ranked: Vec<Agent> = lib.infra.clone();
+    ranked.sort_by(|a, b| rl.weight(&b.name).partial_cmp(&rl.weight(&a.name)).unwrap_or(std::cmp::Ordering::Equal));
+    let cap = if cfg.max_agents > 0 { cfg.max_agents.min(ranked.len()) } else { ranked.len() };
+    let focus = cfg.instructions.clone().unwrap_or_default();
+
+    if cfg.offline {
+        let selected: Vec<Agent> = ranked.into_iter().take(cap).collect();
+        let _ = tx.send(format!("offline: selected {} infra agent(s); no live testing", selected.len())).await;
+        let artifacts = persist(&cfg, &recon, "", &[]);
+        return RunOutput { target: cfg.target.clone(), workdir: cfg.workdir.clone().unwrap_or_default(), findings: vec![],
+            agents_ran: selected.iter().map(|a| a.name.clone()).collect(), candidates: 0, recon, artifacts };
+    }
+
+    let chosen = select_agents(pool, &recon, &focus, &ranked, &tx).await;
+    let selected: Vec<Agent> = if !chosen.is_empty() {
+        let sel: Vec<Agent> = ranked.iter().filter(|a| chosen.iter().any(|c| c == &a.name)).cloned().collect();
+        if sel.is_empty() { ranked.iter().take(cap).cloned().collect() } else { sel.into_iter().take(cap).collect() }
+    } else {
+        ranked.iter().take(cap).cloned().collect()
+    };
+    let selected: Vec<Agent> = { let mut seen = std::collections::HashSet::new();
+        selected.into_iter().filter(|a| seen.insert(a.name.clone())).collect() };
+    let _ = tx.send(format!("selected {} infra agent(s): {}", selected.len(),
+        selected.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", "))).await;
+
+    let target = cfg.target.clone();
+    let verbose = cfg.verbose;
+    let directives = operator_directives(&cfg);
+    let recon_ctx: String = recon.chars().take(3000).collect();
+    let raw: Vec<(String, String, Vec<Finding>)> = stream::iter(selected.iter().cloned())
+        .map(|ag| {
+            let target = target.clone();
+            let recon = recon_ctx.clone();
+            let directives = directives.clone();
+            let txc = tx.clone();
+            async move {
+                if pool.is_cancelled() { return (ag.name.clone(), String::new(), vec![]); }
+                if verbose {
+                    let _ = txc.send(format!("  ▶ launching agent: {} ({})", ag.name, ag.title.replace(" Agent", ""))).await;
+                }
+                let user = format!(
+                    "AUTHORIZED host engagement on {target}. Proceed and PROVE each issue with raw tool output.\n\n{directives}{tooling}{react}{body}\n\nReply ONLY a JSON array of confirmed findings (may be []): {{id,title,severity,cwe,endpoint,payload,evidence,impact,remediation,confidence}}.",
+                    target = target, directives = directives, tooling = HOST_TOOLING, react = REACT_DOCTRINE,
+                    body = ag.user.replace("{target}", &target).replace("{recon_json}", &recon),
+                );
+                match pool.complete_routed(Task::Exploit, &ag.name, &ag.system, &user).await {
+                    Ok((m, text)) => {
+                        let f = extract_findings(&text, &ag.name);
+                        let _ = txc.send(format!("test {} via {} → {} candidate(s)", ag.name, m.label(), f.len())).await;
+                        for c in &f { let _ = txc.send(format!("finding: [{}] {} @ {}", c.severity, c.title, c.endpoint)).await; }
+                        (ag.name.clone(), text, f)
+                    }
+                    Err(e) => { let _ = txc.send(format!("test {} failed: {e}", ag.name)).await;
+                        (ag.name.clone(), format!("ERROR: {e}"), vec![]) }
+                }
+            }
+        })
+        .buffer_unordered(cfg.concurrency)
+        .collect::<Vec<_>>().await;
+
+    let transcript = transcript_of(&raw);
+    let candidates = dedup_findings(raw.iter().flat_map(|(_, _, f)| f.clone()).collect());
+    let _ = tx.send(format!("{} candidate finding(s) (deduped) — validating", candidates.len())).await;
+    let mut findings = validate(candidates, pool, VOTE_SYS, cfg.vote_n, &tx).await;
+    let chained = chain_round(pool, &cfg.target, &recon, &operator_directives(&cfg), &findings, &tx).await;
+    if !chained.is_empty() {
+        let extra = validate(dedup_findings(chained), pool, VOTE_SYS, cfg.vote_n, &tx).await;
+        findings.extend(extra);
+        findings = dedup_findings(findings);
+    }
+    finish(cfg, lib, recon, transcript, findings, selected, &mut rl, tx).await
+}

@@ -130,6 +130,29 @@ enum Cmd {
         #[arg(long)]
         mcp: bool,
     },
+    /// Infra/host: scan an IP/host and run Linux/Windows/AD agents. SSH/Windows
+    /// credentials come from --creds (creds.yaml ssh:/windows: blocks).
+    Host {
+        /// Target host or IP.
+        target: String,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Credentials YAML (ssh / windows / ad blocks).
+        #[arg(long)]
+        creds: Option<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        max_agents: usize,
+        #[arg(long, default_value_t = 3)]
+        vote_n: usize,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        subscription: bool,
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Show agent library counts.
     Agents,
     /// List providers and models.
@@ -178,8 +201,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Agents => {
             let lib = agents::load(&base);
             println!(
-                "{{\"vulns\":{},\"recon\":{},\"code\":{},\"meta\":{},\"total\":{}}}",
-                lib.vulns.len(), lib.recon.len(), lib.code.len(), lib.meta.len(), lib.total()
+                "{{\"vulns\":{},\"recon\":{},\"code\":{},\"infra\":{},\"meta\":{},\"total\":{}}}",
+                lib.vulns.len(), lib.recon.len(), lib.code.len(), lib.infra.len(), lib.meta.len(), lib.total()
             );
         }
         Cmd::Models => {
@@ -251,6 +274,21 @@ async fn main() -> anyhow::Result<()> {
             let mode = if repo.is_some() { Mode::Grey } else { Mode::Black };
             tui::run(&base, cfg, mcp, mode).await?;
         }
+        Cmd::Host { target, models, creds, focus, max_agents, vote_n, offline, subscription, verbose } => {
+            let mut cfg = RunConfig::new(&target);
+            cfg.max_agents = max_agents;
+            cfg.vote_n = vote_n;
+            cfg.offline = offline;
+            cfg.subscription = subscription;
+            cfg.verbose = verbose;
+            cfg.instructions = focus;
+            if !models.is_empty() {
+                cfg.models = models;
+            }
+            apply_creds(&mut cfg, creds.as_deref()).await;
+            let out = run_mode(&base, cfg, false, Mode::Host).await?;
+            print_findings(&out);
+        }
     }
     Ok(())
 }
@@ -274,6 +312,13 @@ pub(crate) async fn apply_creds(cfg: &mut RunConfig, path: Option<&str>) {
     if cfg.auth.is_none() {
         cfg.auth = c.auth_header();
     }
+    // Host credentials (SSH / Windows-AD) → tell the agents how to authenticate
+    // to the host so they can run on-host enumeration / privesc / AD checks.
+    if let Some(hi) = c.host_instruction() {
+        let base = cfg.instructions.clone().unwrap_or_default();
+        cfg.instructions = Some(format!("{hi}\n{base}"));
+        println!("  [*] host credentials loaded (SSH/Windows-AD)");
+    }
     // No direct material but a login flow → perform it now.
     if cfg.auth.is_none() {
         if let Some(login) = &c.login {
@@ -296,7 +341,7 @@ pub(crate) async fn apply_creds(cfg: &mut RunConfig, path: Option<&str>) {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Mode { Black, White, Grey }
+pub(crate) enum Mode { Black, White, Grey, Host }
 
 pub(crate) async fn run_greybox_engagement(base: &Path, cfg: RunConfig, mcp: bool) -> anyhow::Result<RunOutput> {
     run_mode(base, cfg, mcp, Mode::Grey).await
@@ -327,7 +372,7 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
         println!("  │  repo   : {}", cfg.repo.clone().unwrap_or_default());
     }
     println!("  └─ mode   : {}{}{}",
-        match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Black => "black-box" },
+        match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Host => "host/infra", Mode::Black => "black-box" },
         if cfg.subscription { " · subscription" } else { " · api" },
         if mcp { " · mcp" } else { "" });
 
@@ -376,6 +421,7 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
         let out = match mode {
             Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
             Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
+            Mode::Host => harness::run_host(cfg, &lib, &pool, tx).await,
             Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
         };
         out

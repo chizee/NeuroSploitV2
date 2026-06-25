@@ -20,3 +20,18 @@ login:
   username: admin
   password: password
   success: Logout        # text that appears on a successful login
+
+# --- infra/host credentials (used by `neurosploit host <ip> --creds creds.yaml`) ---
+ssh:
+  host: 10.0.0.5
+  port: 22
+  user: ubuntu
+  password: s3cret        # or:
+  key: /home/op/id_ed25519
+
+windows:                  # also used for Active Directory
+  host: 10.0.0.10
+  domain: CORP
+  user: jdoe
+  password: Winter2026!   # or pass-the-hash:
+  hash: aad3b435b51404eeaad3b435b51404ee:NThashhere
