@@ -1,6 +1,7 @@
 //! NeuroSploit v3.5.1 — interactive harness + CLI (`run` / `whitebox` / `agents` / `models`).
 
 mod repl;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use harness::{agents, models::ModelRef, pool::ModelPool, types::RunConfig, RunOutput};
@@ -108,6 +109,27 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Mission Control TUI: concurrent panels (header/feed/findings/targets) with
+    /// a composer active during the run. Black-box (URL) or, with --repo, greybox.
+    Tui {
+        url: String,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        creds: Option<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        max_agents: usize,
+        #[arg(long, default_value_t = 3)]
+        vote_n: usize,
+        #[arg(long)]
+        subscription: bool,
+        #[arg(long)]
+        mcp: bool,
+    },
     /// Show agent library counts.
     Agents,
     /// List providers and models.
@@ -214,9 +236,29 @@ async fn main() -> anyhow::Result<()> {
             let out = run_greybox_engagement(&base, cfg, mcp).await?;
             print_findings(&out);
         }
+        Cmd::Tui { url, models, repo, creds, focus, max_agents, vote_n, subscription, mcp } => {
+            let url = if url.starts_with("http") { url } else { format!("https://{url}") };
+            let mut cfg = RunConfig::new(&url);
+            cfg.max_agents = max_agents;
+            cfg.vote_n = vote_n;
+            cfg.subscription = subscription;
+            cfg.instructions = focus;
+            cfg.repo = repo.clone();
+            if !models.is_empty() {
+                cfg.models = models;
+            }
+            apply_creds(&mut cfg, creds.as_deref()).await;
+            let mode = if repo.is_some() { Mode::Grey } else { Mode::Black };
+            tui::run(&base, cfg, mcp, mode).await?;
+        }
     }
     Ok(())
 }
+
+// Helpers the TUI module reuses.
+pub(crate) fn now_ts_pub() -> u64 { now_ts() }
+pub(crate) fn sanitize_pub(s: &str) -> String { sanitize(s) }
+pub(crate) fn write_status_pub(workdir: &Path, state: &str, extra: &str) { write_status(workdir, state, extra); }
 
 /// Load a creds.yaml into the run config. Direct material (jwt/header/cookie) is
 /// used as-is; a `login:` flow is EXECUTED now (real HTTP) to capture a live

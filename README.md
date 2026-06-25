@@ -93,6 +93,10 @@ neurosploit
 
 # or one-liner (subscription login, no API key needed):
 neurosploit run http://testphp.vulnweb.com/ --subscription --model anthropic:claude-opus-4-8 -v
+
+# 🛰  Mission Control TUI — live panels (header/feed/findings/targets) + a composer
+#    you can type in WHILE the run streams (summary · pause · errors · notes):
+neurosploit tui http://testphp.vulnweb.com/ --subscription --model anthropic:claude-opus-4-8 --mcp
 ```
 
 No login? Use an **API key** instead — see [Authentication](#authentication--run-via-api-key-or-subscription).

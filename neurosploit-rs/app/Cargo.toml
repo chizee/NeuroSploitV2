@@ -18,3 +18,5 @@ futures.workspace = true
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
 dialoguer = "0.11"
+ratatui = "0.28"
+crossterm = "0.28"
