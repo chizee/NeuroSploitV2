@@ -247,6 +247,20 @@ A context bar shows `model auth · cwd · mode▸target`. Key commands:
 Line editing: **↑/↓** history, **Tab** completes commands & `@paths`, **Ctrl-A/E/K**,
 end a line with **`\`** for multiline.
 
+### Runs are non-blocking
+
+`/run` launches the engagement **in the background** and immediately returns the
+prompt — you keep typing while it streams live above the prompt. While it runs:
+
+- **`/status`** — live phase, a **progress bar** (agents done / total), elapsed
+  time, token/cost and the possible findings so far.
+- **`/stop`** — gracefully stop (a report is still generated from partial results).
+- Findings are color-coded by severity (Critical = red … Info = grey), and a
+  confirmed vote shows green ✓.
+- When it finishes you get `◀ run #n done — N validated finding(s) · /results n · /report n`.
+
+(When stdin is piped/non-interactive, `/run` falls back to blocking mode.)
+
 ---
 
 ## 7. Mission Control TUI

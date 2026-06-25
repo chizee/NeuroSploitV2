@@ -13,16 +13,75 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::history::FileHistory;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::{CompletionType, Config, Context, Editor, Helper};
+use rustyline::{CompletionType, Config, Context, Editor, ExternalPrinter, Helper};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// Live state of a background run, updated from the engagement stream so the
+/// composer can answer /status while the runner works.
+struct RunLive {
+    target: String,
+    mode: &'static str,
+    phase: String,
+    started: Instant,
+    findings: Vec<(String, String)>, // sev, title
+    agents: usize,
+    agents_done: usize,
+}
+impl RunLive {
+    /// progress fraction in [0,1] (agents completed / total selected).
+    fn progress(&self) -> f64 {
+        if self.agents == 0 { return 0.0; }
+        (self.agents_done as f64 / self.agents as f64).clamp(0.0, 1.0)
+    }
+    fn bar(&self, width: usize) -> String {
+        let filled = (self.progress() * width as f64).round() as usize;
+        format!("[{}{}] {}/{} ({:.0}%)",
+            "█".repeat(filled), "░".repeat(width.saturating_sub(filled)),
+            self.agents_done, self.agents, self.progress() * 100.0)
+    }
+    fn ingest(&mut self, line: &str) {
+        let low = line.to_lowercase();
+        if low.contains("recon complete") { self.phase = "recon".into(); }
+        else if low.contains("selected") && low.contains("agent") {
+            self.phase = "planning".into();
+            if let Some(n) = line.split_whitespace().find_map(|t| t.parse::<usize>().ok()) { self.agents = n; }
+        }
+        else if low.starts_with("exploit") || low.starts_with("test ") || low.contains("launching agent") { self.phase = "exploiting".into(); }
+        else if low.starts_with("vote") || low.contains("validating") { self.phase = "validating".into(); }
+        else if low.starts_with("chain") { self.phase = "chaining".into(); }
+        else if low.contains("phase complete") || low.contains("validated finding(s)") { self.phase = "complete".into(); }
+        // count completed agents (each emits "... via <model> → N candidate(s)")
+        if low.contains("candidate(s)") && (low.starts_with("exploit ") || low.starts_with("test ") || low.starts_with("analyze ") || low.starts_with("review ")) {
+            self.agents_done += 1;
+        }
+        if let Some(rest) = line.strip_prefix("finding: ") {
+            if let Some(b) = rest.strip_prefix('[') {
+                if let Some((sev, tail)) = b.split_once(']') {
+                    let title = tail.trim().split(" @ ").next().unwrap_or(tail.trim());
+                    self.findings.push((sev.to_string(), title.to_string()));
+                }
+            }
+        }
+    }
+}
+
+/// A run executing in the background of the REPL.
+struct ActiveRun {
+    live: Arc<Mutex<RunLive>>,
+    cancel: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
 
 /// All slash-commands, for Tab completion.
 const COMMANDS: &[&str] = &[
     "/help", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
     "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
-    "/votes", "/agents", "/theme", "/clear", "/run", "/runs", "/results", "/report",
+    "/votes", "/agents", "/theme", "/clear", "/run", "/stop", "/runs", "/results", "/report",
     "/status", "/diff", "/retest", "/quit",
 ];
 
@@ -154,6 +213,15 @@ impl Reader {
         Reader::Plain(std::io::stdin())
     }
 
+    /// An external printer that can write *above* the prompt from another task —
+    /// this is what lets a background run stream live while you keep typing.
+    fn external_printer(&mut self) -> Option<Box<dyn ExternalPrinter + Send>> {
+        match self {
+            Reader::Rl(ed, _) => ed.create_external_printer().ok().map(|p| Box::new(p) as Box<dyn ExternalPrinter + Send>),
+            Reader::Plain(_) => None,
+        }
+    }
+
     /// Returns None to exit (EOF / Ctrl-D), Some(line) otherwise. Ctrl-C cancels
     /// the current line (returns an empty string) instead of exiting.
     /// `prompt` is the dynamic context bar + prompt to show.
@@ -202,12 +270,14 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
 
     let mut s = Session::default();
     let resumed = load_session(&mut s);
-    let mut history: Vec<RunRecord> = load_runs(base);
-    if resumed || !history.is_empty() {
-        println!("  ↻ resumed project session from {} — {} past run(s)\n",
-            proj_dir().display(), history.len());
+    // Shared so a background run's forwarder task can append to it.
+    let history: Arc<Mutex<Vec<RunRecord>>> = Arc::new(Mutex::new(load_runs(base)));
+    let past = history.lock().unwrap().len();
+    if resumed || past > 0 {
+        println!("  ↻ resumed project session from {} — {} past run(s)\n", proj_dir().display(), past);
     }
     let mut reader = Reader::new(base);
+    let mut active: Option<ActiveRun> = None;
     show(&s);
 
     loop {
@@ -291,16 +361,30 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
             "/agents" => { s.max_agents = arg.parse().unwrap_or(s.max_agents); println!("  max agents: {}", s.max_agents); }
             "/clear" => { print!("\x1b[2J\x1b[H"); }
             "/run" | "/go" => {
-                save_session(&s);
-                println!("\n\x1b[1;35m▶ RUNNING engagement\x1b[0m \x1b[2m— output streams below; the REPL prompt returns when it finishes. (For a live interactive run, use:  neurosploit tui <url>)\x1b[0m\n");
-                run(base, &s, &mut history).await;
-                save_runs(base, &history);
-                println!("\n\x1b[1;32m◀ back to the NeuroSploit REPL\x1b[0m \x1b[2m— /results  /report  /runs  /diff  /show\x1b[0m");
+                if active.as_ref().map(|a| !a.done.load(Ordering::Relaxed)).unwrap_or(false) {
+                    println!("  a run is already active — /status to check, /stop to halt it.");
+                } else {
+                    save_session(&s);
+                    match start_background(base, &s, &mut reader, history.clone()).await {
+                        Some(a) => { active = Some(a); println!("  \x1b[1;35m▶ running in background\x1b[0m — keep typing · \x1b[36m/status\x1b[0m · \x1b[36m/stop\x1b[0m"); }
+                        None => { // no external printer (piped) → blocking fallback
+                            let mut h = history.lock().unwrap();
+                            run(base, &s, &mut h).await; save_runs(base, &h);
+                        }
+                    }
+                }
             }
-            "/runs" | "/history" => list_runs(&history),
-            "/diff" | "/changed" => diff_runs(&history),
+            "/stop" => {
+                match &active {
+                    Some(a) if !a.done.load(Ordering::Relaxed) => { a.cancel.store(true, Ordering::Relaxed); println!("  ⏸ stopping — finishing in-flight work; a report is generated on completion."); }
+                    _ => println!("  no active run."),
+                }
+            }
+            "/runs" | "/history" => list_runs(&history.lock().unwrap()),
+            "/diff" | "/changed" => diff_runs(&history.lock().unwrap()),
             "/retest" => {
-                if let Some(r) = pick(&history, arg) {
+                let h = history.lock().unwrap();
+                if let Some(r) = pick(&h, arg) {
                     if r.target.starts_with('/') { s.repo = Some(r.target.clone()); s.target = None; }
                     else { s.target = Some(r.target.clone()); }
                     let titles: Vec<String> = r.findings.iter().map(|f| f.title.clone()).collect();
@@ -310,10 +394,32 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                     println!("  ↻ retest set up for {} ({} prior finding(s)) — /run to launch", r.target, titles.len());
                 }
             }
-            "/results" => results(&history, arg),
-            "/report" => open_report(&history, arg),
-            "/status" => run_status(&history, arg),
-            "/quit" | "/exit" | "/q" => { save_session(&s); println!("  session saved → {} · bye.", proj_dir().display()); break; }
+            "/results" => results(&history.lock().unwrap(), arg),
+            "/report" => open_report(&history.lock().unwrap(), arg),
+            "/status" => {
+                // Live status if a run is active, else a past run's status.json.
+                match &active {
+                    Some(a) if arg.is_empty() && !a.done.load(Ordering::Relaxed) => {
+                        let l = a.live.lock().unwrap();
+                        let el = l.started.elapsed().as_secs();
+                        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+                        for (sv, _) in &l.findings { *by.entry(sv.as_str()).or_insert(0) += 1; }
+                        let sev = if by.is_empty() { "0".into() } else { by.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" ") };
+                        println!("  \x1b[1m▶ live\x1b[0m {} ({}) · phase {} · {:02}:{:02} · {} possible finding(s) [{}]",
+                            l.target, l.mode, l.phase, el / 60, el % 60, l.findings.len(), sev);
+                        if l.agents > 0 { println!("    progress \x1b[36m{}\x1b[0m", l.bar(24)); }
+                        for (sv, t) in l.findings.iter().rev().take(5) { println!("    ✦ [{sv}] {t}"); }
+                    }
+                    _ => run_status(&history.lock().unwrap(), arg),
+                }
+            }
+            "/quit" | "/exit" | "/q" => {
+                if active.as_ref().map(|a| !a.done.load(Ordering::Relaxed)).unwrap_or(false) {
+                    if let Some(a) = &active { a.cancel.store(true, Ordering::Relaxed); }
+                    println!("  ⏸ a run is active — requested stop; quitting.");
+                }
+                save_session(&s); println!("  session saved → {} · bye.", proj_dir().display()); break;
+            }
             other => println!("  unknown command '{other}' — try /help"),
         }
     }
@@ -448,6 +554,63 @@ async fn run(base: &Path, s: &Session, history: &mut Vec<RunRecord>) {
         }
         Err(e) => println!("  \x1b[31m✗ run failed: {e}\x1b[0m"),
     }
+}
+
+/// Launch an engagement in the BACKGROUND: it streams live via the editor's
+/// external printer while the REPL keeps accepting commands (/status, /stop).
+/// Returns None when no external printer is available (piped) → caller blocks.
+async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
+                          history: Arc<Mutex<Vec<RunRecord>>>) -> Option<ActiveRun> {
+    let (target, mode_s, mode_e, mcp) = match (&s.repo, &s.target) {
+        (Some(_), Some(t)) => (t.clone(), "greybox", crate::Mode::Grey, s.mcp),
+        (Some(r), None) => (r.clone(), "white-box", crate::Mode::White, false),
+        (None, Some(t)) => (t.clone(), "black-box", crate::Mode::Black, s.mcp),
+        _ => { println!("  \x1b[31m✗ set a /target <url> and/or /repo <path> first.\x1b[0m"); return None; }
+    };
+    let mut cfg = RunConfig::new(&target);
+    cfg.models = s.models.clone();
+    cfg.subscription = s.subscription;
+    cfg.vote_n = s.vote_n;
+    cfg.max_agents = s.max_agents;
+    cfg.verbose = true;
+    cfg.offline = s.offline;
+    cfg.instructions = if s.attachments.is_empty() { s.instructions.clone() }
+        else { Some(format!("{}\n\nATTACHED CONTEXT:\n{}", s.instructions.clone().unwrap_or_default(), s.attachments.join("\n\n"))) };
+    cfg.auth = s.auth.clone();
+    if matches!(mode_e, crate::Mode::Grey) { cfg.repo = s.repo.clone(); }
+    crate::apply_creds(&mut cfg, s.creds.as_deref()).await;
+
+    let mut printer = reader.external_printer()?; // None on piped stdin → blocking fallback
+    let sp = crate::spawn_engagement(base, cfg, mcp, mode_e);
+
+    let live = Arc::new(Mutex::new(RunLive {
+        target: target.clone(), mode: mode_s, phase: "starting".into(),
+        started: Instant::now(), findings: vec![], agents: 0, agents_done: 0,
+    }));
+    let cancel = sp.cancel.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let (live2, done2, hist2) = (live.clone(), done.clone(), history);
+
+    tokio::spawn(async move {
+        let crate::Spawned { task, mut rx, workdir, .. } = sp;
+        while let Some(line) = rx.recv().await {
+            live2.lock().unwrap().ingest(&line);
+            if let Some(out) = crate::render_compact(&line) { let _ = printer.print(out); }
+        }
+        let out = crate::finalize_run(task.await.unwrap_or_default(), &workdir);
+        let id = {
+            let mut h = hist2.lock().unwrap();
+            let id = h.len() + 1;
+            h.push(RunRecord { id, mode: mode_s.into(), target, workdir: out.workdir.clone(), findings: out.findings.clone() });
+            if let Ok(j) = serde_json::to_string_pretty(&*h) { std::fs::write(proj_dir().join("runs.json"), j).ok(); }
+            id
+        };
+        let _ = printer.print(format!(
+            "\x1b[1;32m◀ run #{id} done — {} validated finding(s)\x1b[0m · /results {id} · /report {id}",
+            out.findings.len()));
+        done2.store(true, Ordering::Relaxed);
+    });
+    Some(ActiveRun { live, cancel, done })
 }
 
 /// Project-local store: `<cwd>/.neurosploit/` so each project keeps its own
@@ -616,24 +779,37 @@ fn show(s: &Session) {
 }
 
 fn help() {
-    println!("  Commands (↑/↓ recall history · Ctrl-A/E/K edit · Ctrl-C cancels line):");
-    println!("    /model [a:b,..]     set models; with no arg → arrow-key multi-select");
-    println!("    /providers          list providers & models");
-    println!("    /key [prov key]     configure API keys for your models (no arg → guided)");
-    println!("    /sub on|off         use local subscription login instead of API key");
-    println!("    /target <url>       black-box target URL");
-    println!("    /repo <path>        analyse a repo (repo+target = greybox: code + live)");
-    println!("    /auth <value>       auth header (e.g. 'Authorization: Bearer <jwt>')");
-    println!("    /creds <file.yaml>  credentials (jwt/header/cookie/login) for authed tests");
-    println!("    /focus <text>       steer the tests (or just type it); e.g. injection + access control");
-    println!("    @path  @dir  @f:1-20   attach a file/folder/line-range to context (Tab-completes)");
-    println!("    /attach <path>      attach context   ·   /context  list attachments");
-    println!("    /mcp on|off         Playwright MCP browser   /offline on|off  self-test");
-    println!("    /theme color|mono   /config (=/show)   /votes <n>   /agents <n>");
-    println!("    Tab completes commands & @paths · ↑/↓ history · end a line with \\ for multiline");
-    println!("    /run                launch   ·   /runs   /results [n]   /report [n]   /status [n]");
-    println!("    /diff               what changed vs the previous run   ·   /retest [n]  re-verify a past run");
-    println!("    /quit               exit");
+    let h = |c: &str, d: &str| println!("    \x1b[36m{c:<20}\x1b[0m {d}");
+    println!("\n  \x1b[1mNeuroSploit REPL — commands\x1b[0m");
+
+    println!("\n  \x1b[2mTARGET & SCOPE\x1b[0m");
+    h("/target <url>",      "black-box target URL");
+    h("/repo <path>",       "analyse a repo (repo + target = greybox: code + live)");
+    h("/auth <value>",      "auth header, e.g. 'Authorization: Bearer <jwt>' (no arg = show)");
+    h("/creds <file.yaml>", "credentials: jwt/header/cookie/login + ssh/windows");
+    h("/focus <text>",      "steer the tests (or just type the instruction)");
+    h("@path @dir @f:1-20", "attach a file/folder/line-range to context (Tab → menu)");
+    h("/attach /context",   "attach a path · list attachments");
+
+    println!("\n  \x1b[2mMODELS & AUTH\x1b[0m");
+    h("/model [a:b,..]",    "set models (no arg → arrow-key multi-select)");
+    h("/providers",         "list providers & models");
+    h("/key [prov key]",    "configure API keys for your models (no arg → guided)");
+    h("/sub on|off",        "use local subscription login instead of an API key");
+
+    println!("\n  \x1b[2mRUN & MONITOR\x1b[0m");
+    h("/run",               "launch (runs in the BACKGROUND — keep typing)");
+    h("/status",            "live progress + findings while running (or a past run #)");
+    h("/stop",              "gracefully stop the active run");
+    h("/runs",              "list runs · /results [n] · /report [n]");
+    h("/diff /retest [n]",  "what changed vs last run · re-verify a past run");
+
+    println!("\n  \x1b[2mOPTIONS\x1b[0m");
+    h("/mcp on|off",        "Playwright MCP browser    /offline on|off  self-test");
+    h("/votes <n>",         "validator votes           /agents <n>  cap agents");
+    h("/theme color|mono",  "/show (config)            /clear        /quit");
+
+    println!("\n  \x1b[2m↑/↓ history · Tab completes commands & @paths · Ctrl-A/E/K edit · \\ for multiline\x1b[0m\n");
 }
 
 /// Scan a line for @path tokens, attach each referenced file/dir to context.
@@ -709,4 +885,7 @@ fn context_prompt(s: &Session) -> String {
 }
 
 fn onoff(b: bool) -> &'static str { if b { "on" } else { "off" } }
-fn trunc(s: &str, n: usize) -> String { if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n.saturating_sub(1)]) } }
+fn trunc(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() }
+    else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}

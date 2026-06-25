@@ -416,9 +416,12 @@ impl Default for ChatClient {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
+    // Truncate by CHARACTERS, never bytes — slicing `&s[..n]` panics when `n`
+    // lands inside a multi-byte char (e.g. '—'). That panic was crashing agent
+    // tasks and silently dropping their findings.
+    if s.chars().count() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n])
+        format!("{}…", s.chars().take(n).collect::<String>())
     }
 }

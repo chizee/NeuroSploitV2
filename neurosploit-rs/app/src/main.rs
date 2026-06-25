@@ -352,10 +352,19 @@ pub(crate) async fn run_engagement(base: &Path, cfg: RunConfig, mcp: bool, white
     run_mode(base, cfg, mcp, if whitebox { Mode::White } else { Mode::Black }).await
 }
 
-async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> anyhow::Result<RunOutput> {
-    let lib = agents::load(base);
+/// A spawned engagement: the running task, its live event stream, a cancel
+/// handle, and the run's output dir. Lets callers drive it blocking (run_mode)
+/// or in the background (the REPL), and finalize with `finalize_run`.
+pub(crate) struct Spawned {
+    pub task: tokio::task::JoinHandle<RunOutput>,
+    pub rx: tokio::sync::mpsc::Receiver<String>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub workdir: PathBuf,
+}
 
-    // Unique, sortable run id → runs/<id>/
+/// Set up + start an engagement (synchronous setup; the work runs in the task).
+pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> Spawned {
+    let lib = agents::load(base);
     let run_id = format!("ns-{}-{}", now_ts(), sanitize(&cfg.target));
     let workdir = base.join("runs").join(&run_id);
     std::fs::create_dir_all(&workdir).ok();
@@ -376,22 +385,16 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
         if cfg.subscription { " · subscription" } else { " · api" },
         if mcp { " · mcp" } else { "" });
 
-    // Playwright MCP: only for backends that support it; auto-provision if asked.
     let mcp_config = if mcp && cfg.subscription {
         let providers: Vec<String> = cfg.models.iter().map(|m| ModelRef::parse(m).provider).collect();
         if providers.iter().any(|p| harness::mcp_supported(p)) {
             match harness::ensure_playwright_mcp() {
                 Ok(()) => {
-                    // Optional user-supplied extra MCP servers merged into the pipeline.
                     let extra = base.join("mcp.servers.json");
                     let extra_ref = if extra.is_file() { Some(extra.as_path()) } else { None };
                     match harness::write_mcp_config(&workdir, extra_ref) {
-                    Ok(p) => {
-                        if extra_ref.is_some() { println!("  [*] merged extra MCP servers from mcp.servers.json"); }
-                        println!("  [*] Playwright MCP ready → {}", p.display());
-                        Some(p.display().to_string())
-                    }
-                    Err(e) => { eprintln!("  [!] MCP config failed: {e}"); None }
+                        Ok(p) => { println!("  [*] Playwright MCP ready → {}", p.display()); Some(p.display().to_string()) }
+                        Err(e) => { eprintln!("  [!] MCP config failed: {e}"); None }
                     }
                 }
                 Err(e) => { eprintln!("  [!] Playwright MCP unavailable ({e}); using built-in tools"); None }
@@ -400,31 +403,39 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
             eprintln!("  [!] selected backend(s) don't support MCP; using built-in tools");
             None
         }
-    } else {
-        None
-    };
+    } else { None };
 
     let refs: Vec<ModelRef> = cfg.models.iter().map(|s| ModelRef::parse(s)).collect();
     let pool = ModelPool::with_auth(refs, cfg.concurrency, cfg.subscription, mcp_config);
     let cancel = pool.cancel_handle();
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
-    let printer = tokio::spawn(async move {
-        while let Some(line) = rx.recv().await {
-            render_line(&line);
-        }
-    });
-
-    // Run the engagement as a task so Ctrl-C can stop it gracefully (the AI's
-    // in-flight CLI/subprocesses are bounded; no new agents launch once cancelled).
-    let mut task = tokio::spawn(async move {
-        let out = match mode {
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
+    let task = tokio::spawn(async move {
+        match mode {
             Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
             Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
             Mode::Host => harness::run_host(cfg, &lib, &pool, tx).await,
             Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
-        };
-        out
+        }
+    });
+    Spawned { task, rx, cancel, workdir }
+}
+
+/// Generate the report + final status for a finished run, ensuring the workdir
+/// is always recorded (even on an aborted/partial run).
+pub(crate) fn finalize_run(mut out: RunOutput, workdir: &Path) -> RunOutput {
+    if out.workdir.is_empty() { out.workdir = workdir.display().to_string(); }
+    if out.target.is_empty() {
+        out.target = workdir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    }
+    let _ = harness::report::typst_report(&out.target, &out.findings, workdir);
+    write_status(workdir, "complete", &format!("\"findings\":{},\"agents_ran\":{}", out.findings.len(), out.agents_ran.len()));
+    out
+}
+
+async fn run_mode(base: &Path, cfg: RunConfig, mcp: bool, mode: Mode) -> anyhow::Result<RunOutput> {
+    let Spawned { mut task, mut rx, cancel, workdir } = spawn_engagement(base, cfg, mcp, mode);
+    let printer = tokio::spawn(async move {
+        while let Some(line) = rx.recv().await { render_line(&line); }
     });
 
     let mut cancelled = false;
@@ -453,12 +464,7 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
         }
     }
 
-    // Final report via Typst (PDF if the `typst` binary is present) + HTML/MD already written.
-    match harness::report::typst_report(&out.target, &out.findings, &workdir) {
-        Ok(p) => println!("  [*] report → {}", p.display()),
-        Err(e) => eprintln!("  [!] typst report skipped: {e}"),
-    }
-    write_status(&workdir, "complete", &format!("\"findings\":{},\"agents_ran\":{}", out.findings.len(), out.agents_ran.len()));
+    let out = finalize_run(out, &workdir);
     println!("  ✓ COMPLETE — {} validated finding(s) · status: {}/status.json", out.findings.len(), workdir.display());
     Ok(out)
 }
@@ -542,6 +548,59 @@ fn render_line(raw: &str) {
         "plan" => state("🧭", "plan", &format!("{who}{rest}"), "\x1b[36m"),
         _ => render_untagged(line),
     }
+}
+
+/// One-line styled rendering of a stream event — used by the background REPL run
+/// (via rustyline's external printer) where multi-line cards would fight the
+/// prompt. Returns None for events that shouldn't clutter the background feed.
+pub(crate) fn render_compact(raw: &str) -> Option<String> {
+    let mut line = raw.trim_end();
+    let mut who = String::new();
+    if let Some(stripped) = line.strip_prefix('@') {
+        if let Some((label, rest)) = stripped.split_once(' ') { who = format!("[{label}] "); line = rest; }
+    }
+    let (tag, rest) = line.split_once(": ").unwrap_or(("", line));
+    let s = match tag {
+        "exec" | "danger" => format!("\x1b[33m  ⌘ {who}{}\x1b[0m", trunc1(rest, 110)),
+        "net" => format!("\x1b[36m  🌐 {who}{}\x1b[0m", trunc1(rest, 110)),
+        "read" => format!("\x1b[34m  📄 {who}{}\x1b[0m", rest),
+        "tokens" => { track_tokens(rest); return None; } // counted, shown in /status
+        // Candidate finding — color by severity (not all-yellow).
+        "finding" => {
+            let sev = rest.strip_prefix('[').and_then(|b| b.split_once(']')).map(|(s, _)| s).unwrap_or("");
+            format!("  {}✦ {who}{}\x1b[0m", sev_color(sev), rest)
+        }
+        "notify" => format!("\x1b[1;36m  🔔 {}\x1b[0m", rest),
+        "ai" => return None, // skip verbose model chatter in background feed
+        _ => {
+            let low = line.to_lowercase();
+            if low.contains("recon complete") { "\x1b[36m  🔍 recon complete\x1b[0m".into() }
+            else if low.contains("selected") && low.contains("agent") { format!("\x1b[36m  🧭 {}\x1b[0m", trunc1(line, 110)) }
+            else if low.starts_with("vote") && low.contains("confirmed") { format!("\x1b[1;32m  ✓ {}\x1b[0m", trunc1(line, 110)) }
+            else if low.starts_with("exploit") || low.starts_with("test ") || low.contains("launching agent") { format!("\x1b[35m  🧪 {}\x1b[0m", trunc1(line, 110)) }
+            else if low.starts_with("vote") { format!("\x1b[2m  · {}\x1b[0m", trunc1(line, 110)) }
+            else if low.contains("fail") || low.contains("error") { format!("\x1b[31m  ✗ {}\x1b[0m", trunc1(line, 110)) }
+            else { return None; }
+        }
+    };
+    Some(s)
+}
+
+/// ANSI color per severity — so confirmed/critical findings stand out instead of
+/// everything being yellow.
+fn sev_color(sev: &str) -> &'static str {
+    match sev.trim() {
+        "Critical" => "\x1b[1;31m",  // bold red
+        "High"     => "\x1b[38;5;208m", // orange
+        "Medium"   => "\x1b[33m",     // yellow
+        "Low"      => "\x1b[36m",     // cyan
+        _          => "\x1b[37m",     // info/grey
+    }
+}
+
+fn trunc1(s: &str, n: usize) -> String {
+    let one = s.replace('\n', " ");
+    if one.chars().count() <= n { one } else { format!("{}…", one.chars().take(n).collect::<String>()) }
 }
 
 // Running token/cost total across the engagement (shown in the summary).

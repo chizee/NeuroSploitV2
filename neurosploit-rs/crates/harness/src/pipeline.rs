@@ -862,7 +862,11 @@ fn collect_repo_context(root: &Path, max_files: usize, max_bytes: usize) -> Stri
             let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
             let budget = max_bytes.saturating_sub(out.len());
             let take = content.len().min(budget).min(8_000);
-            out.push_str(&format!("\n// ===== file: {} =====\n{}\n", rel, &content[..take]));
+            // Char-safe slice: back off to the nearest char boundary so multibyte
+            // source files (UTF-8) never panic.
+            let mut end = take.min(content.len());
+            while end > 0 && !content.is_char_boundary(end) { end -= 1; }
+            out.push_str(&format!("\n// ===== file: {} =====\n{}\n", rel, &content[..end]));
             files += 1;
         }
     }

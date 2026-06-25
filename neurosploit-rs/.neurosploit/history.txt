@@ -11,3 +11,14 @@ run
 /reports
 /report
 /exit
+/show
+/run
+/results
+/report
+/help
+/results
+/target http://testasp.vulnweb.com/
+/run
+/results
+/report
+/exit

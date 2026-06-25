@@ -5,5 +5,19 @@
     "target": "https://redteamleaders.com",
     "workdir": "",
     "findings": []
+  },
+  {
+    "id": 2,
+    "mode": "black-box",
+    "target": "https://redteamleaders.com",
+    "workdir": "",
+    "findings": []
+  },
+  {
+    "id": 3,
+    "mode": "black-box",
+    "target": "http://testasp.vulnweb.com/",
+    "workdir": "",
+    "findings": []
   }
 ]

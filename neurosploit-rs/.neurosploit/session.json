@@ -6,7 +6,7 @@
   "mcp": false,
   "vote_n": 3,
   "max_agents": 0,
-  "target": "https://redteamleaders.com",
+  "target": "http://testasp.vulnweb.com/",
   "repo": null,
   "auth": null,
   "creds": null,
