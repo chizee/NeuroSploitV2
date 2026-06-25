@@ -7,11 +7,83 @@
 
 use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use harness::{agents, types::Finding, types::RunConfig};
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::FileHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Config, Context, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::path::Path;
+
+/// All slash-commands, for Tab completion.
+const COMMANDS: &[&str] = &[
+    "/help", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
+    "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
+    "/votes", "/agents", "/theme", "/clear", "/run", "/runs", "/results", "/report",
+    "/status", "/quit",
+];
+
+/// rustyline helper: Tab-completes `/commands` and `@filesystem-paths`,
+/// and supports multiline input (a line ending with `\` continues).
+struct NsHelper;
+
+impl Completer for NsHelper {
+    type Candidate = Pair;
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let head = &line[..pos];
+        // current "word" = text after the last whitespace
+        let start = head.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let word = &head[start..];
+        if let Some(p) = word.strip_prefix('@') {
+            return Ok((start, complete_path(p)));
+        }
+        if word.starts_with('/') || (start == 0 && word.is_empty()) {
+            let cands = COMMANDS.iter()
+                .filter(|c| c.starts_with(word))
+                .map(|c| Pair { display: c.to_string(), replacement: format!("{c} ") })
+                .collect();
+            return Ok((start, cands));
+        }
+        Ok((start, vec![]))
+    }
+}
+
+fn complete_path(prefix: &str) -> Vec<Pair> {
+    let (dir, frag) = match prefix.rfind('/') {
+        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        None => ("", prefix),
+    };
+    let read_dir = if dir.is_empty() { ".".to_string() } else { dir.to_string() };
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&read_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(frag) {
+                let is_dir = e.path().is_dir();
+                let full = format!("@{dir}{name}{}", if is_dir { "/" } else { "" });
+                out.push(Pair { display: format!("{name}{}", if is_dir { "/" } else { "" }), replacement: full });
+            }
+        }
+    }
+    out.truncate(40);
+    out
+}
+
+impl Hinter for NsHelper { type Hint = String; }
+impl Highlighter for NsHelper {}
+impl Validator for NsHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        if ctx.input().ends_with('\\') {
+            Ok(ValidationResult::Incomplete) // multiline: backslash continues
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
+impl Helper for NsHelper {}
 
 /// A run completed within this session (persisted to disk for /runs across sessions).
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,6 +107,8 @@ struct Session {
     auth: Option<String>,
     creds: Option<String>,
     instructions: Option<String>,
+    attachments: Vec<String>,
+    color: bool,
 }
 
 impl Default for Session {
@@ -51,22 +125,27 @@ impl Default for Session {
             auth: None,
             creds: None,
             instructions: None,
+            attachments: Vec::new(),
+            color: true,
         }
     }
 }
 
 const PROMPT: &str = "\x1b[35mneurosploit›\x1b[0m ";
 
-/// Line reader: full rustyline editing when interactive, plain stdin when piped.
+/// Line reader: full rustyline editing (Tab-complete, history, multiline) when
+/// interactive, plain stdin when piped.
 enum Reader {
-    Rl(Box<DefaultEditor>, std::path::PathBuf),
+    Rl(Box<Editor<NsHelper, FileHistory>>, std::path::PathBuf),
     Plain(std::io::Stdin),
 }
 
 impl Reader {
     fn new(base: &Path) -> Reader {
         if std::io::stdin().is_terminal() {
-            if let Ok(mut ed) = DefaultEditor::new() {
+            let cfg = Config::builder().auto_add_history(false).build();
+            if let Ok(mut ed) = Editor::<NsHelper, FileHistory>::with_config(cfg) {
+                ed.set_helper(Some(NsHelper));
                 let hist = base.join("data").join("repl_history.txt");
                 std::fs::create_dir_all(hist.parent().unwrap()).ok();
                 let _ = ed.load_history(&hist);
@@ -82,6 +161,8 @@ impl Reader {
         match self {
             Reader::Rl(ed, hist) => match ed.readline(PROMPT) {
                 Ok(l) => {
+                    // Join multiline input: a trailing `\` continued the line.
+                    let l = l.replace("\\\n", " ").replace('\n', " ");
                     if !l.trim().is_empty() {
                         let _ = ed.add_history_entry(l.as_str());
                         let _ = ed.save_history(hist);
@@ -134,8 +215,10 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
             continue;
         }
         if !line.starts_with('/') {
+            let attached = expand_ats(line, &mut s);
             s.instructions = Some(line.to_string());
             println!("  focus set: {line}");
+            if attached > 0 { println!("  ({attached} @attachment(s) added to context)"); }
             continue;
         }
         let mut parts = line.splitn(2, char::is_whitespace);
@@ -183,6 +266,16 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
             "/focus" | "/instructions" => {
                 s.instructions = if arg.is_empty() { None } else { Some(arg.to_string()) };
                 println!("  focus: {}", s.instructions.clone().unwrap_or_else(|| "(none)".into()));
+            }
+            "/attach" => { let n = attach_path(arg.trim_start_matches('@'), &mut s); if n > 0 { println!("  attached ({} total)", s.attachments.len()); } }
+            "/context" => {
+                if s.attachments.is_empty() { println!("  no attachments — add with @path or /attach <path>"); }
+                else { println!("  context attachments ({}):", s.attachments.len());
+                    for a in &s.attachments { println!("    • {}", a.lines().next().unwrap_or("").trim_start_matches("// ")); } }
+            }
+            "/theme" => {
+                s.color = !matches!(arg, "off" | "mono" | "no-color" | "plain");
+                println!("  theme: {}", if s.color { "color" } else { "mono" });
             }
             "/mcp" => { s.mcp = !matches!(arg, "off" | "false" | "0" | "no"); println!("  Playwright MCP: {}", onoff(s.mcp)); }
             "/offline" => { s.offline = !matches!(arg, "off" | "false" | "0" | "no"); println!("  offline: {}", onoff(s.offline)); }
@@ -300,7 +393,14 @@ async fn run(base: &Path, s: &Session, history: &mut Vec<RunRecord>) {
     cfg.max_agents = s.max_agents;
     cfg.verbose = true;
     cfg.offline = s.offline;
-    cfg.instructions = s.instructions.clone();
+    // Fold @attachments (scope files / stack traces) into the instruction context.
+    cfg.instructions = match (s.instructions.clone(), s.attachments.is_empty()) {
+        (instr, true) => instr,
+        (instr, false) => {
+            let ctx = s.attachments.join("\n\n");
+            Some(format!("{}\n\nATTACHED CONTEXT:\n{ctx}", instr.unwrap_or_default()))
+        }
+    };
     cfg.auth = s.auth.clone();
     if let M::Grey { repo, .. } = &m {
         cfg.repo = Some(repo.clone());
@@ -430,10 +530,64 @@ fn help() {
     println!("    /auth <value>       auth header (e.g. 'Authorization: Bearer <jwt>')");
     println!("    /creds <file.yaml>  credentials (jwt/header/cookie/login) for authed tests");
     println!("    /focus <text>       steer the tests (or just type it); e.g. injection + access control");
+    println!("    @path  @dir  @f:1-20   attach a file/folder/line-range to context (Tab-completes)");
+    println!("    /attach <path>      attach context   ·   /context  list attachments");
     println!("    /mcp on|off         Playwright MCP browser   /offline on|off  self-test");
-    println!("    /votes <n>          /agents <n>");
+    println!("    /theme color|mono   /config (=/show)   /votes <n>   /agents <n>");
+    println!("    Tab completes commands & @paths · ↑/↓ history · end a line with \\ for multiline");
     println!("    /run                launch   ·   /runs   /results [n]   /report [n]   /status [n]");
     println!("    /quit               exit");
+}
+
+/// Scan a line for @path tokens, attach each referenced file/dir to context.
+fn expand_ats(line: &str, s: &mut Session) -> usize {
+    let mut n = 0;
+    for tok in line.split_whitespace() {
+        if let Some(p) = tok.strip_prefix('@') {
+            n += attach_path(p, s);
+        }
+    }
+    n
+}
+
+/// Attach a file's content (capped) or a directory listing to session context.
+/// Supports @file, @folder, and @file:LINE / @file:START-END.
+fn attach_path(spec: &str, s: &mut Session) -> usize {
+    if spec.is_empty() { return 0; }
+    let (path, range) = match spec.split_once(':') {
+        Some((p, r)) => (p, Some(r)),
+        None => (spec, None),
+    };
+    let pb = Path::new(path);
+    if pb.is_dir() {
+        let mut items: Vec<String> = std::fs::read_dir(pb).map(|rd| rd.flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string()).collect()).unwrap_or_default();
+        items.sort();
+        s.attachments.push(format!("// dir {path}:\n{}", items.join("\n")));
+        println!("  + folder {path} ({} entries)", items.len());
+        return 1;
+    }
+    match std::fs::read_to_string(pb) {
+        Ok(content) => {
+            let body = match range.and_then(parse_range) {
+                Some((a, b)) => content.lines().enumerate()
+                    .filter(|(i, _)| *i + 1 >= a && *i + 1 <= b)
+                    .map(|(_, l)| l).collect::<Vec<_>>().join("\n"),
+                None => content.chars().take(8000).collect(),
+            };
+            println!("  + file {spec} ({} bytes)", body.len());
+            s.attachments.push(format!("// file {spec}:\n{body}"));
+            1
+        }
+        Err(_) => { println!("  \x1b[31m✗ cannot read @{spec}\x1b[0m"); 0 }
+    }
+}
+
+fn parse_range(r: &str) -> Option<(usize, usize)> {
+    match r.split_once('-') {
+        Some((a, b)) => Some((a.trim().parse().ok()?, b.trim().parse().ok()?)),
+        None => { let n: usize = r.trim().parse().ok()?; Some((n, n)) }
+    }
 }
 
 fn onoff(b: bool) -> &'static str { if b { "on" } else { "off" } }

@@ -1,4 +1,4 @@
-<h1 align="center">NeuroSploit v3.4.1 🦀</h1>
+<h1 align="center">🧠 NeuroSploit v3.5.0</h1>
 
 <p align="center">
   <a href="https://github.com/JoasASantos/NeuroSploit/stargazers"><img src="https://img.shields.io/github/stars/JoasASantos/NeuroSploit?style=for-the-badge&logo=github&color=8b5cf6" alt="Stars"></a>
@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.4.1-blue?style=flat-square">
+  <img src="https://img.shields.io/badge/Version-3.5.0-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Harness-Rust%20%7C%20tokio-e6b673?style=flat-square">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
   <img src="https://img.shields.io/badge/MD%20Agents-303-red?style=flat-square">
@@ -37,17 +37,32 @@ discovered surface**, runs them in parallel, then validates every finding by
 
 ---
 
+## 📦 Install (one line)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JoasASantos/NeuroSploit/main/setup.sh | bash
+```
+
+The installer auto-installs Rust if needed, clones the repo to `~/.neurosploit`,
+builds the release binary, and links `neurosploit` into `~/.local/bin`. Re-run it
+any time to update. Tweak with env vars: `NEUROSPLOIT_REF` (branch/tag),
+`NEUROSPLOIT_DIR`, `PREFIX`.
+
+Prefer to build by hand?
+
+```bash
+git clone https://github.com/JoasASantos/NeuroSploit && cd NeuroSploit/neurosploit-rs
+cargo build --release      # → target/release/neurosploit
+```
+
 ## ⚡ Quick start (60 seconds)
 
 ```bash
-# 1. build
-cd neurosploit-rs && cargo build --release
+# easiest path — just run it; the interactive session asks everything:
+neurosploit
 
-# 2. easiest path — just run it, the wizard asks everything:
-./target/release/neurosploit
-
-# 3. or one-liner (subscription login, no API key needed):
-./target/release/neurosploit run http://testphp.vulnweb.com/ --subscription --model anthropic:claude-opus-4-8 -v
+# or one-liner (subscription login, no API key needed):
+neurosploit run http://testphp.vulnweb.com/ --subscription --model anthropic:claude-opus-4-8 -v
 ```
 
 No login? Use an **API key** instead — see [Authentication](#authentication--run-via-api-key-or-subscription).
