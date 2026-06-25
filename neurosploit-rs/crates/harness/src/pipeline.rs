@@ -88,7 +88,7 @@ pub async fn run(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Sender<Str
         "{}".to_string()
     } else {
         let recon_user = format!("{}{}Target: {}", operator_directives(&cfg), tool_doctrine(pool.mcp_config.is_some()), cfg.target);
-        match pool.complete_routed(Task::Recon, RECON_SYS, &recon_user).await {
+        match pool.complete_routed(Task::Recon, "recon", RECON_SYS, &recon_user).await {
             Ok((m, t)) => {
                 let _ = tx.send(format!("recon complete via {}", m.label())).await;
                 if cfg.verbose {
@@ -159,6 +159,9 @@ pub async fn run(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Sender<Str
             let directives = directives.clone();
             let txc = tx.clone();
             async move {
+                if pool.is_cancelled() {
+                    return (ag.name.clone(), String::new(), vec![]);
+                }
                 if verbose {
                     let _ = txc.send(format!("  ▶ launching agent: {} ({})", ag.name, ag.title.replace(" Agent", ""))).await;
                 }
@@ -174,7 +177,7 @@ pub async fn run(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Sender<Str
                     doctrine = tool_doctrine(mcp_on),
                     body = ag.user.replace("{target}", &target).replace("{recon_json}", &recon),
                 );
-                match pool.complete_routed(Task::Exploit, &ag.system, &user).await {
+                match pool.complete_routed(Task::Exploit, &ag.name, &ag.system, &user).await {
                     Ok((m, text)) => {
                         let f = extract_findings(&text, &ag.name);
                         let _ = txc.send(format!("exploit {} via {} → {} candidate(s)", ag.name, m.label(), f.len())).await;
@@ -246,7 +249,7 @@ pub async fn run_whitebox(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: S
                     ag.user.replace("{target}", "the provided repository").replace("{recon_json}", "{}"),
                     ctx
                 );
-                match pool.complete(&ag.system, &user).await {
+                match pool.complete_routed(Task::Exploit, &ag.name, &ag.system, &user).await {
                     Ok((m, text)) => {
                         let f = extract_findings(&text, &ag.name);
                         let _ = txc.send(format!("analyze {} via {} → {} candidate(s)", ag.name, m.label(), f.len())).await;
@@ -283,7 +286,7 @@ pub async fn run_greybox(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Se
     let recon = if cfg.offline {
         "{}".to_string()
     } else {
-        match pool.complete_routed(Task::Recon, RECON_SYS,
+        match pool.complete_routed(Task::Recon, "recon", RECON_SYS,
             &format!("{}{}Target: {}", operator_directives(&cfg), tool_doctrine(pool.mcp_config.is_some()), cfg.target)).await {
             Ok((m, t)) => { let _ = tx.send(format!("recon complete via {}", m.label())).await; t }
             Err(e) => { let _ = tx.send(format!("recon failed ({e})")).await; "{}".to_string() }
@@ -310,7 +313,7 @@ pub async fn run_greybox(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Se
                          where endpoint is file:line.",
                         ag.user.replace("{target}", "the repository").replace("{recon_json}", "{}"), ctx
                     );
-                    match pool.complete_routed(Task::Select, &ag.system, &user).await {
+                    match pool.complete_routed(Task::Select, &ag.name, &ag.system, &user).await {
                         Ok((_, text)) => { let f = extract_findings(&text, &ag.name);
                             let _ = txc.send(format!("review {} → {} lead(s)", ag.name, f.len())).await; f }
                         Err(_) => vec![],
@@ -371,6 +374,9 @@ pub async fn run_greybox(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Se
             let leads = leads_ctx.clone();
             let txc = tx.clone();
             async move {
+                if pool.is_cancelled() {
+                    return (ag.name.clone(), String::new(), vec![]);
+                }
                 if verbose {
                     let _ = txc.send(format!("  ▶ launching agent: {} ({})", ag.name, ag.title.replace(" Agent", ""))).await;
                 }
@@ -383,7 +389,7 @@ pub async fn run_greybox(cfg: RunConfig, lib: &Library, pool: &ModelPool, tx: Se
                     react = REACT_DOCTRINE, doctrine = tool_doctrine(mcp_on),
                     body = ag.user.replace("{target}", &target).replace("{recon_json}", &recon),
                 );
-                match pool.complete_routed(Task::Exploit, &ag.system, &user).await {
+                match pool.complete_routed(Task::Exploit, &ag.name, &ag.system, &user).await {
                     Ok((m, text)) => { let f = extract_findings(&text, &ag.name);
                         let _ = txc.send(format!("exploit {} via {} → {} candidate(s)", ag.name, m.label(), f.len())).await;
                         (ag.name.clone(), text, f) }
@@ -431,7 +437,7 @@ async fn chain_round(pool: &ModelPool, target: &str, recon: &str, directives: &s
          (may be []): {{id,title,severity,cwe,endpoint,payload,evidence,impact,remediation,confidence}}.",
         react = REACT_DOCTRINE, doctrine = tool_doctrine(pool.mcp_config.is_some()),
     );
-    match pool.complete_routed(Task::Exploit, CHAIN_SYS, &user).await {
+    match pool.complete_routed(Task::Exploit, "chain", CHAIN_SYS, &user).await {
         Ok((m, text)) => {
             let f = extract_findings(&text, "chain");
             let _ = tx.send(format!("chain via {} → {} new candidate(s)", m.label(), f.len())).await;
@@ -461,7 +467,7 @@ async fn select_agents(pool: &ModelPool, recon: &str, focus: &str, catalog: &[Ag
         format!("OPERATOR FOCUS (strongly prioritise agents for this): {focus}\n\n")
     };
     let user = format!("{focus_line}RECON:\n{recon_trim}\n\nAGENT CATALOG (name — title [cwe]):\n{list}\n\nReturn a JSON array of agent names to run.");
-    match pool.complete_routed(Task::Select, SELECT_SYS, &user).await {
+    match pool.complete_routed(Task::Select, "select", SELECT_SYS, &user).await {
         Ok((m, text)) => {
             let names = parse_string_array(&text);
             if names.is_empty() {

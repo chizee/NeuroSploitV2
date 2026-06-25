@@ -34,6 +34,9 @@ pub struct ModelPool {
     /// Progress channel: when set, the subscription CLI streams structured
     /// activity (tools called, commands run, files read) here live.
     progress: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
+    /// Cooperative cancellation: when set, in-flight model calls short-circuit
+    /// and the pipeline stops launching new agents (graceful stop).
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ModelPool {
@@ -61,6 +64,7 @@ impl ModelPool {
             subscription,
             mcp_config,
             progress: std::sync::Mutex::new(None),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -76,21 +80,31 @@ impl ModelPool {
         self.progress.lock().ok().and_then(|g| g.clone())
     }
 
+    /// Handle to request graceful cancellation of an in-progress engagement.
+    pub fn cancel_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// One completion for a model, via subscription CLI (optionally with MCP) or
-    /// HTTP API, with a short retry/backoff to ride out transient failures
-    /// (rate limits, MCP cold-starts, network blips).
-    async fn one(&self, m: &ModelRef, system: &str, user: &str) -> Result<String> {
+    /// HTTP API, with a short retry/backoff. `label` (e.g. the agent name) tags
+    /// the streamed activity so each command/tool is attributable.
+    async fn one(&self, label: &str, m: &ModelRef, system: &str, user: &str) -> Result<String> {
+        if self.is_cancelled() {
+            return Err(anyhow!("cancelled"));
+        }
         let use_cli = self.subscription && cli_binary_for(&m.provider).is_some();
         let progress = self.progress();
         let mut last = anyhow::anyhow!("no attempt");
         for attempt in 0..3u64 {
             if attempt > 0 {
-                // 1.5s, 4.5s backoff.
                 tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt * attempt.max(1))).await;
             }
             let r = if use_cli {
                 self.client
-                    .chat_cli(&m.provider, &m.model, system, user, self.mcp_config.as_deref(), progress.clone())
+                    .chat_cli(label, &m.provider, &m.model, system, user, self.mcp_config.as_deref(), progress.clone())
                     .await
             } else {
                 self.client.chat(m, system, user).await
@@ -104,20 +118,17 @@ impl ModelPool {
     }
 
     /// Complete a prompt, trying each candidate model until one succeeds.
-    /// Returns the model that answered and its text.
     pub async fn complete(&self, system: &str, user: &str) -> Result<(ModelRef, String)> {
-        self.complete_routed(Task::Default, system, user).await
+        self.complete_routed(Task::Default, "", system, user).await
     }
 
-    /// Router-aware completion: reorder the candidate panel by task before the
-    /// failover loop. Recon/triage prefer a fast/cheap model to save tokens and
-    /// latency; exploitation prefers the strongest (primary) model.
-    pub async fn complete_routed(&self, task: Task, system: &str, user: &str) -> Result<(ModelRef, String)> {
+    /// Router-aware completion. `label` tags streamed activity (agent name).
+    pub async fn complete_routed(&self, task: Task, label: &str, system: &str, user: &str) -> Result<(ModelRef, String)> {
         let _permit = self.sem.acquire().await.expect("semaphore closed");
         let order = self.route(task);
         let mut last = anyhow!("no candidate models");
         for m in &order {
-            match self.one(m, system, user).await {
+            match self.one(label, m, system, user).await {
                 Ok(text) => return Ok((m.clone(), text)),
                 Err(e) => last = e,
             }
@@ -166,7 +177,7 @@ impl ModelPool {
                 Ok(p) => p,
                 Err(_) => break,
             };
-            if let Ok(text) = self.one(m, system, user).await {
+            if let Ok(text) = self.one("validate", m, system, user).await {
                 total += 1;
                 let t = text.to_lowercase();
                 if t.contains("\"verdict\": \"confirmed\"")

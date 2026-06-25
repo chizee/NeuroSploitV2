@@ -119,6 +119,10 @@ pub struct RunConfig {
     /// Greybox: a source repository to review alongside the live `target` URL.
     #[serde(default)]
     pub repo: Option<String>,
+    /// Explicit agent allowlist. When non-empty, the pipeline runs exactly these
+    /// agents (skipping recon-based selection) — used by the category picker.
+    #[serde(default)]
+    pub pinned: Vec<String>,
 }
 
 fn default_vote() -> usize {
@@ -144,6 +148,7 @@ impl RunConfig {
             instructions: None,
             auth: None,
             repo: None,
+            pinned: Vec::new(),
         }
     }
 }

@@ -134,6 +134,7 @@ impl ChatClient {
     /// **Playwright** (browse, execute JS, screenshot) during execution.
     pub async fn chat_cli(
         &self,
+        label: &str,
         provider: &str,
         model: &str,
         system: &str,
@@ -146,9 +147,9 @@ impl ChatClient {
         let prompt = format!("{system}\n\n{user}");
 
         // Claude Code can stream structured events (tools, commands, files) which
-        // we surface live as a categorized activity feed.
+        // we surface live as a categorized activity feed, attributed to `label`.
         if bin == "claude" {
-            return self.chat_claude_stream(model, &prompt, mcp_config, progress).await;
+            return self.chat_claude_stream(label, model, &prompt, mcp_config, progress).await;
         }
 
         let mut cmd = Command::new(bin);
@@ -213,6 +214,7 @@ impl ChatClient {
     /// Tagged events are sent to `progress`; the final assistant text is returned.
     async fn chat_claude_stream(
         &self,
+        label: &str,
         model: &str,
         prompt: &str,
         mcp_config: Option<&str>,
@@ -233,9 +235,11 @@ impl ChatClient {
         }
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
+        // Tag every streamed event with the agent label so the feed is attributable.
+        let lbl = if label.is_empty() { String::new() } else { format!("@{label} ") };
         let emit = |s: String| {
             if let Some(tx) = &progress {
-                let _ = tx.try_send(s);
+                let _ = tx.try_send(format!("{lbl}{s}"));
             }
         };
 
@@ -270,6 +274,14 @@ impl ChatClient {
                     Some("result") => {
                         if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
                             result = r.to_string();
+                        }
+                        // Token/cost telemetry from the final result event.
+                        let ti = v.pointer("/usage/input_tokens").and_then(|x| x.as_u64());
+                        let to = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64());
+                        let cost = v.get("total_cost_usd").and_then(|x| x.as_f64());
+                        if ti.is_some() || to.is_some() || cost.is_some() {
+                            emit(format!("tokens: in={} out={} cost=${:.4}",
+                                ti.unwrap_or(0), to.unwrap_or(0), cost.unwrap_or(0.0)));
                         }
                         if v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false) {
                             had_err = v.get("result").and_then(|x| x.as_str()).unwrap_or("error").to_string();

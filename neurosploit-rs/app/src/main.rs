@@ -319,6 +319,7 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
 
     let refs: Vec<ModelRef> = cfg.models.iter().map(|s| ModelRef::parse(s)).collect();
     let pool = ModelPool::with_auth(refs, cfg.concurrency, cfg.subscription, mcp_config);
+    let cancel = pool.cancel_handle();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
     let printer = tokio::spawn(async move {
@@ -326,12 +327,43 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
             render_line(&line);
         }
     });
-    let out = match mode {
-        Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
-        Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
-        Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
+
+    // Run the engagement as a task so Ctrl-C can stop it gracefully (the AI's
+    // in-flight CLI/subprocesses are bounded; no new agents launch once cancelled).
+    let mut task = tokio::spawn(async move {
+        let out = match mode {
+            Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
+            Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
+            Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
+        };
+        out
+    });
+
+    let mut cancelled = false;
+    let out: RunOutput = tokio::select! {
+        r = &mut task => r.unwrap_or_default(),
+        _ = tokio::signal::ctrl_c() => {
+            cancelled = true;
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            println!("\n  \x1b[33m⏸  stopping — finishing in-flight work… (Ctrl-C again to abort now)\x1b[0m");
+            tokio::select! {
+                r = &mut task => r.unwrap_or_default(),
+                _ = tokio::signal::ctrl_c() => { task.abort(); println!("  \x1b[31m✗ aborted.\x1b[0m"); RunOutput::default() }
+            }
+        }
     };
     let _ = printer.await;
+
+    // On a graceful stop, ask whether to keep (generate report) or discard.
+    if cancelled {
+        let keep = ask_yes_no("Generate a report from partial results? [Y/n]");
+        if !keep {
+            std::fs::remove_dir_all(&workdir).ok();
+            write_status(&workdir, "discarded", "");
+            println!("  🗑  discarded run {}", workdir.display());
+            return Ok(out);
+        }
+    }
 
     // Final report via Typst (PDF if the `typst` binary is present) + HTML/MD already written.
     match harness::report::typst_report(&out.target, &out.findings, &workdir) {
@@ -353,8 +385,12 @@ pub(crate) fn print_findings(out: &RunOutput) {
         println!("\n  \x1b[1mAttack path / kill chain\x1b[0m");
         print!("{}", harness::attack_graph::ascii_killchain(&out.findings));
     }
+    let toks = token_summary();
+    if !toks.is_empty() {
+        println!("\n  {toks}");
+    }
     if !out.artifacts.is_empty() {
-        println!("\n  artifacts: {}", out.artifacts.join(", "));
+        println!("  artifacts: {}", out.artifacts.join(", "));
         println!("  (full attack graph rendered in report.html)");
     }
 }
@@ -372,6 +408,18 @@ fn now_ts() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Blocking yes/no prompt (default yes). Used after a graceful Ctrl-C.
+fn ask_yes_no(q: &str) -> bool {
+    use std::io::Write;
+    print!("  {q} ");
+    std::io::stdout().flush().ok();
+    let mut s = String::new();
+    if std::io::stdin().read_line(&mut s).is_err() {
+        return true;
+    }
+    !matches!(s.trim().to_lowercase().as_str(), "n" | "no")
+}
+
 // ── Activity-feed renderer ─────────────────────────────────────────────────
 // Turns the harness's tagged progress stream into a categorized feed: tool/
 // command/file events render as compact cards; everything else as a state line
@@ -379,22 +427,58 @@ fn now_ts() -> u64 {
 const RST: &str = "\x1b[0m";
 
 fn render_line(raw: &str) {
-    let line = raw.trim_end();
+    let mut line = raw.trim_end();
+    // Optional "@agent " prefix tags which agent produced the event.
+    let mut who = String::new();
+    if let Some(stripped) = line.strip_prefix('@') {
+        if let Some((label, rest)) = stripped.split_once(' ') {
+            who = format!("\x1b[2m[{label}]\x1b[0m ");
+            line = rest;
+        }
+    }
     let (tag, rest) = match line.split_once(": ") {
-        Some((t, r)) if matches!(t, "exec" | "danger" | "read" | "edit" | "tool" | "net" | "ai" | "plan") => (t, r),
+        Some((t, r)) if matches!(t, "exec" | "danger" | "read" | "edit" | "tool" | "net" | "ai" | "plan" | "tokens") => (t, r),
         _ => ("", line),
     };
     match tag {
-        "exec" => card("⌘ command", rest, "\x1b[33m"),
-        "danger" => card("⚠ DANGEROUS command", rest, "\x1b[1;31m"),
-        "read" => state("📄", "reading", rest, "\x1b[34m"),
-        "edit" => state("✏️", "editing", rest, "\x1b[35m"),
-        "net" => card("🌐 request", rest, "\x1b[36m"),
-        "tool" => state("🔧", "tool", rest, "\x1b[35m"),
-        "ai" => state("💬", "", rest, "\x1b[2m"),
-        "plan" => state("🧭", "plan", rest, "\x1b[36m"),
+        "exec" => card(&format!("{who}⌘ command"), rest, "\x1b[33m"),
+        "danger" => card(&format!("{who}⚠ DANGEROUS command"), rest, "\x1b[1;31m"),
+        "read" => state("📄", "reading", &format!("{who}{rest}"), "\x1b[34m"),
+        "edit" => state("✏️", "editing", &format!("{who}{rest}"), "\x1b[35m"),
+        "net" => card(&format!("{who}🌐 request"), rest, "\x1b[36m"),
+        "tool" => state("🔧", "tool", &format!("{who}{rest}"), "\x1b[35m"),
+        "tokens" => { track_tokens(rest); state("🪙", "tokens", &format!("{who}{rest}"), "\x1b[2;33m"); }
+        "ai" => state("💬", "", &format!("{who}{rest}"), "\x1b[2m"),
+        "plan" => state("🧭", "plan", &format!("{who}{rest}"), "\x1b[36m"),
         _ => render_untagged(line),
     }
+}
+
+// Running token/cost total across the engagement (shown in the summary).
+static TOK_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TOK_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COST_MILLI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn track_tokens(rest: &str) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // parse "in=N out=M cost=$X.XXXX"
+    for part in rest.split_whitespace() {
+        if let Some(v) = part.strip_prefix("in=") { TOK_IN.fetch_add(v.parse().unwrap_or(0), Relaxed); }
+        else if let Some(v) = part.strip_prefix("out=") { TOK_OUT.fetch_add(v.parse().unwrap_or(0), Relaxed); }
+        else if let Some(v) = part.strip_prefix("cost=$") {
+            COST_MILLI.fetch_add((v.parse::<f64>().unwrap_or(0.0) * 1000.0) as u64, Relaxed);
+        }
+    }
+}
+
+/// Render and reset the running token/cost total (called at end of a run).
+pub(crate) fn token_summary() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let i = TOK_IN.swap(0, Relaxed);
+    let o = TOK_OUT.swap(0, Relaxed);
+    let c = COST_MILLI.swap(0, Relaxed) as f64 / 1000.0;
+    if i == 0 && o == 0 && c == 0.0 { return String::new(); }
+    format!("🪙 tokens: in={i} out={o} · est. cost ${c:.4}")
 }
 
 fn render_untagged(l: &str) {
