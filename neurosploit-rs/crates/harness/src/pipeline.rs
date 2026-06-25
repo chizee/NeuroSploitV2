@@ -604,6 +604,27 @@ async fn validate(candidates: Vec<Finding>, pool: &ModelPool, sys: &str, vote_n:
 
 async fn finish(cfg: RunConfig, _lib: &Library, recon: String, transcript: String, mut findings: Vec<Finding>,
                 selected: Vec<Agent>, rl: &mut RlState, tx: Sender<String>) -> RunOutput {
+    // --- Grounding gate: no claim without a tool receipt (anti-hallucination) ---
+    // White/grey carry source context; black-box is verified empirically.
+    let whitebox = cfg.repo.is_some() && cfg.target.starts_with('/');
+    let before = findings.len();
+    let (kept, demoted) = crate::grounding::gate(findings, &transcript, whitebox);
+    findings = kept;
+    if demoted > 0 {
+        let _ = tx.send(format!("grounding gate: demoted {demoted}/{before} ungrounded claim(s) (no tool receipt)")).await;
+    }
+
+    // --- POMDP belief: build from grounded findings, report residual uncertainty ---
+    let mut wm = crate::belief::WorldModel::new();
+    wm.deterministic = whitebox;
+    for f in &findings {
+        wm.add(&f.id, crate::belief::Kind::Exploit, &f.title, f.confidence.max(0.05).min(0.99));
+    }
+    let unc = wm.uncertainty(None);
+    if !findings.is_empty() {
+        let _ = tx.send(format!("belief uncertainty over confirmed findings: {:.2} (0=sharp,1=diffuse)", unc)).await;
+    }
+
     let _ = tx.send(format!("{} validated finding(s)", findings.len())).await;
     // Map findings to OWASP / MITRE / kill-chain stage for the attack graph.
     crate::attack_graph::enrich(&mut findings);

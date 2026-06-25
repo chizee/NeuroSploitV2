@@ -1,4 +1,4 @@
-// NeuroSploit v3.5.0 — Typst report template (blank, structured).
+// NeuroSploit v3.5.1 — Typst report template (blank, structured).
 //
 // The harness generates `report.typ` per run by prepending a `findings` array
 // and a `meta` dict, then including this template's rendering logic. This file
@@ -24,7 +24,7 @@
 
 #set page(margin: 2cm, numbering: "1", footer: context [
   #set text(size: 8pt, fill: gray)
-  NeuroSploit v3.5.0 · #meta.target · confidential
+  NeuroSploit v3.5.1 · #meta.target · confidential
   #h(1fr) #counter(page).display()
 ])
 #set text(font: ("Helvetica Neue", "Helvetica", "Arial"), size: 10pt)

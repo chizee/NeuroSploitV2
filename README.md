@@ -1,4 +1,4 @@
-<h1 align="center">🧠 NeuroSploit v3.5.0</h1>
+<h1 align="center">🧠 NeuroSploit v3.5.1</h1>
 
 <p align="center">
   <a href="https://github.com/JoasASantos/NeuroSploit/stargazers"><img src="https://img.shields.io/github/stars/JoasASantos/NeuroSploit?style=for-the-badge&logo=github&color=8b5cf6" alt="Stars"></a>
@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.5.0-blue?style=flat-square">
+  <img src="https://img.shields.io/badge/Version-3.5.1-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Harness-Rust%20%7C%20tokio-e6b673?style=flat-square">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
   <img src="https://img.shields.io/badge/MD%20Agents-303-red?style=flat-square">
@@ -20,6 +20,36 @@
 <i>by Joas A Santos &amp; Red Team Leaders</i></p>
 
 > ⭐ If this is useful, **star the repo** — it helps a lot.
+
+---
+
+## 🆕 v3.5.1 — POMDP belief & grounded anti-hallucination
+
+The target is only **partially observable**, so v3.5.1 stops treating findings as
+booleans and tracks a **belief**:
+
+- **Belief world model** (`belief.rs`) — a property graph whose nodes
+  (host / service / vuln / exploit / credential) each carry a *probability*, not a
+  boolean. Observations update them with a Bayesian step; per-node **Shannon
+  entropy** measures how diffuse the belief still is.
+- **Value-of-information planner** (`pomdp.rs`) — "scan more vs exploit now" is
+  not a heuristic: when a node's belief is diffuse, the expected value of an
+  observation (recon) exceeds the risk-adjusted value of an exploit. The
+  `may_assert` gate is the **mathematical anti-hallucination rule** — the agent
+  may not claim exploitability while the belief is diffuse; it must observe first.
+- **Grounding / verification engine** (`grounding.rs`) — a hard rule: **no claim
+  enters the world model without a tool receipt** (raw tool output, not the LLM's
+  paraphrase). Black-box grounding is *empirical* (a real HTTP response / OOB
+  callback / error oracle); white-box is *symbolic* (a `file:line` into the
+  reviewed source). Ungrounded claims are demoted and flagged `receipt_missing`.
+- **Regimes** — black-box runs a true POMDP (diffuse priors that sharpen with
+  observation); white-box collapses toward a near-deterministic MDP (the world
+  model is built from SAST/dataflow, so uncertainty migrates to *path
+  reachability*, not state).
+
+> Roadmap (in progress on this branch): infra targets (IP + SSH/Windows/AD) with
+> Linux/Windows/AD host agents, a contextual-bandit tool router, and
+> value-of-information reward shaping.
 
 ---
 
