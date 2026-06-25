@@ -69,8 +69,26 @@ pub fn html(target: &str, findings: &[Finding]) -> String {
         rows
     };
 
+    // Attack graph (Mermaid) + kill-chain table.
+    let graph = crate::attack_graph::mermaid(&sorted);
+    let graph_block = if graph.is_empty() {
+        String::new()
+    } else {
+        let rows: String = sorted.iter().map(|f| format!(
+            "<tr><td>{}</td><td><span class=sev style=background:{}>{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            esc(&f.stage), sev_color(&f.severity), esc(&f.severity), esc(&f.title),
+            esc(&f.owasp), esc(&f.mitre), esc(&f.exploitability))).collect();
+        format!(
+            "<h2>Attack Path &amp; Kill Chain</h2>\
+             <div class=mermaid>{graph}</div>\
+             <table class=kc><tr><th>Stage</th><th>Sev</th><th>Finding</th><th>OWASP</th><th>MITRE</th><th>Exploitability</th></tr>{rows}</table>\
+             <script type=module>import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';mermaid.initialize({{startOnLoad:true,theme:'dark'}});</script>"
+        )
+    };
     format!(
         "<!DOCTYPE html><html><head><meta charset=utf-8><title>NeuroSploit Report — {t}</title><style>\
+         table.kc{{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}}table.kc th,table.kc td{{border:1px solid #e3e3e3;padding:6px 9px;text-align:left}}\
+         .mermaid{{background:#0f1117;border-radius:10px;padding:16px;margin:14px 0;overflow:auto}}\
          body{{font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a;max-width:860px;margin:40px auto;padding:0 24px}}\
          h1{{margin:0}}.meta{{color:#666;margin:4px 0 18px}}.chip{{color:#fff;border-radius:999px;padding:4px 12px;margin-right:8px;font-size:13px;font-weight:600}}\
          .finding{{border:1px solid #e3e3e3;border-radius:12px;padding:16px 20px;margin:16px 0}}.finding h3{{margin:0 0 8px;font-size:16px}}\
@@ -80,9 +98,9 @@ pub fn html(target: &str, findings: &[Finding]) -> String {
          .b{{color:#8b5cf6;font-weight:800}}</style></head><body>\
          <h1><span class=b>NeuroSploit</span> Penetration Test Report</h1>\
          <div class=meta>Target: <b>{t}</b> · v3.5.0 Rust harness · multi-model validated</div>\
-         <div>{chips}</div><h2>Findings ({n})</h2>{body}\
+         <div>{chips}</div>{graph_block}<h2>Findings ({n})</h2>{body}\
          <p class=meta>Authorized testing only. Findings confirmed by multi-model adversarial voting.<br>NeuroSploit v3.5.0 · by <b>Joas A Santos</b> &amp; <b>Red Team Leaders</b></p></body></html>",
-        t = esc(target), chips = chips, n = sorted.len(), body = body,
+        t = esc(target), chips = chips, n = sorted.len(), body = body, graph_block = graph_block,
     )
 }
 

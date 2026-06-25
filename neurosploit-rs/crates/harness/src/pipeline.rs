@@ -596,9 +596,11 @@ async fn validate(candidates: Vec<Finding>, pool: &ModelPool, sys: &str, vote_n:
     validated.into_iter().filter(|f| f.validated).collect()
 }
 
-async fn finish(cfg: RunConfig, _lib: &Library, recon: String, transcript: String, findings: Vec<Finding>,
+async fn finish(cfg: RunConfig, _lib: &Library, recon: String, transcript: String, mut findings: Vec<Finding>,
                 selected: Vec<Agent>, rl: &mut RlState, tx: Sender<String>) -> RunOutput {
     let _ = tx.send(format!("{} validated finding(s)", findings.len())).await;
+    // Map findings to OWASP / MITRE / kill-chain stage for the attack graph.
+    crate::attack_graph::enrich(&mut findings);
 
     // RL update: reward agents that produced validated findings; gently decay idle.
     let hit: std::collections::HashMap<&str, f64> = findings.iter().fold(Default::default(), |mut m, f| {
@@ -725,6 +727,7 @@ fn extract_findings(text: &str, agent: &str) -> Vec<Finding> {
                 confidence: conf(o.get("confidence")),
                 validated: false,
                 votes: String::new(),
+                ..Default::default()
             })
         })
         .collect()

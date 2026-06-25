@@ -28,6 +28,25 @@ pub struct Finding {
     /// Per-model vote summary, e.g. "3/4 confirmed".
     #[serde(default)]
     pub votes: String,
+    // --- attack-graph / kill-chain mapping (best-effort, optional) ---
+    /// OWASP Top 10 category, e.g. "A03:2021-Injection".
+    #[serde(default)]
+    pub owasp: String,
+    /// MITRE ATT&CK technique id, e.g. "T1190".
+    #[serde(default)]
+    pub mitre: String,
+    /// Kill-chain stage: recon|initial-access|execution|privesc|lateral|exfil|impact.
+    #[serde(default)]
+    pub stage: String,
+    /// Exploitability: trivial|moderate|hard.
+    #[serde(default)]
+    pub exploitability: String,
+    /// Business impact, one line.
+    #[serde(default)]
+    pub business_impact: String,
+    /// IDs of findings this one chains from (attack-path edges).
+    #[serde(default)]
+    pub chains_from: Vec<String>,
 }
 
 impl Default for Finding {
@@ -47,6 +66,12 @@ impl Default for Finding {
             confidence: 0.0,
             validated: false,
             votes: String::new(),
+            owasp: String::new(),
+            mitre: String::new(),
+            stage: String::new(),
+            exploitability: String::new(),
+            business_impact: String::new(),
+            chains_from: Vec::new(),
         }
     }
 }

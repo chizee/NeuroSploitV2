@@ -345,9 +345,17 @@ async fn run_mode(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> any
 
 pub(crate) fn print_findings(out: &RunOutput) {
     println!("\n=== {} validated finding(s) ===", out.findings.len());
-    println!("{}", serde_json::to_string_pretty(&out.findings).unwrap_or_default());
+    if !out.findings.is_empty() {
+        let mut by = std::collections::BTreeMap::new();
+        for f in &out.findings { *by.entry(f.severity.as_str()).or_insert(0) += 1; }
+        let chips: Vec<String> = by.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+        println!("  severity: {}", chips.join("  "));
+        println!("\n  \x1b[1mAttack path / kill chain\x1b[0m");
+        print!("{}", harness::attack_graph::ascii_killchain(&out.findings));
+    }
     if !out.artifacts.is_empty() {
-        println!("artifacts: {}", out.artifacts.join(", "));
+        println!("\n  artifacts: {}", out.artifacts.join(", "));
+        println!("  (full attack graph rendered in report.html)");
     }
 }
 

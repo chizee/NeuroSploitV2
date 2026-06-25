@@ -7,6 +7,7 @@
 //! **N-model voting** before scoring and reporting.
 
 pub mod agents;
+pub mod attack_graph;
 pub mod creds;
 pub mod models;
 pub mod pipeline;
