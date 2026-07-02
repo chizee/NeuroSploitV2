@@ -170,7 +170,22 @@ fn complete_path(prefix: &str) -> Vec<Pair> {
 }
 
 impl Hinter for NsHelper { type Hint = String; }
-impl Highlighter for NsHelper {}
+impl Highlighter for NsHelper {
+    // Color the prompt for display only. rustyline measures the ORIGINAL (plain)
+    // prompt for cursor width, so adding ANSI here does NOT break line editing —
+    // unlike embedding escapes in the prompt string passed to readline().
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        if prompt.trim_start().starts_with("neurosploit") {
+            std::borrow::Cow::Owned(format!("\x1b[35m{prompt}\x1b[0m"))
+        } else {
+            std::borrow::Cow::Borrowed(prompt)
+        }
+    }
+}
 impl Validator for NsHelper {
     fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
         if ctx.input().ends_with('\\') {
@@ -341,7 +356,8 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     show(&s);
 
     loop {
-        let Some(line) = reader.read(&context_prompt(&s)) else { println!("\n  bye."); break };
+        println!("{}", context_prompt(&s)); // dim context line above the prompt
+        let Some(line) = reader.read(PROMPT) else { println!("\n  bye."); break };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -1214,10 +1230,14 @@ fn context_prompt(s: &Session) -> String {
     };
     let tgt = s.target.clone().or_else(|| s.repo.clone()).unwrap_or_default();
     let tgt = if tgt.is_empty() { String::new() } else { format!("▸{}", tgt.replace("https://", "").replace("http://", "")) };
-    format!(
-        "\x1b[2m{model} {auth} · {cwd} · {mode}{tgt}\x1b[0m\n\x1b[35mneurosploit›\x1b[0m "
-    )
+    // Dim context line, printed ABOVE the prompt (not part of the readline prompt,
+    // so its ANSI/newline never corrupts rustyline's cursor math).
+    format!("\x1b[2m{model} {auth} · {cwd} · {mode}{tgt}\x1b[0m")
 }
+
+/// The actual readline prompt — plain text so rustyline measures its width
+/// correctly; color is applied by the Highlighter, not embedded here.
+const PROMPT: &str = "neurosploit› ";
 
 fn onoff(b: bool) -> &'static str { if b { "on" } else { "off" } }
 fn trunc(s: &str, n: usize) -> String {
