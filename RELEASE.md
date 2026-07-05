@@ -102,6 +102,24 @@ interactive line-editing.
 - **Rate-limit testing** is a first-class control check (small non-disruptive
   burst → look for 429/lockout/Retry-After), never a DoS.
 
+## Subscription login check & Playwright MCP fixes
+
+- **Subscription login preflight.** Before a `--subscription` run, the harness
+  checks that the local CLI (claude/codex/…) is **installed and logged in** and
+  prints a clear warning if not — instead of the run silently coming back with
+  0 findings. (Not logged in → the CLI returns empty instantly, which was the
+  usual cause of "it found nothing / MCP didn't execute".)
+- **Playwright MCP now installs the browser.** `ensure_playwright_mcp` also runs
+  `npx playwright install chromium` (best-effort; skip with
+  `NEUROSPLOIT_SKIP_BROWSER_INSTALL=1`) so the first browser action doesn't
+  fail/hang with a missing Chromium.
+- **Codex MCP wiring fixed.** Codex takes MCP servers as `-c mcp_servers.*` TOML
+  overrides (not a config-file path); the harness now injects our Playwright
+  server correctly, so MCP works on Codex too — not just Claude.
+- **"No tool activity" diagnostic.** If a subscription+MCP run performs zero
+  browser/tool actions, the REPL warns that the CLI likely isn't logged in or the
+  MCP didn't start.
+
 ## Multi-role auth & access-control testing
 
 - **Named identities in `creds.yaml`** for IDOR / BOLA / BFLA / privilege-escalation

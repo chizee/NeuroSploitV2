@@ -552,6 +552,32 @@ pub(crate) struct Spawned {
     pub workdir: PathBuf,
 }
 
+/// When running in subscription mode, verify the local CLI is installed AND
+/// logged in before the engagement starts — otherwise every agent comes back
+/// empty and it looks like "0 findings" when the real cause is auth. Checks the
+/// primary model's provider; prints a clear warning (non-fatal).
+pub(crate) async fn subscription_preflight(cfg: &RunConfig) {
+    if !cfg.subscription || cfg.offline { return; }
+    let Some(primary) = cfg.models.first() else { return };
+    let provider = ModelRef::parse(primary).provider;
+    if harness::models::cli_binary_for(&provider).is_none() { return; }
+    print!("  [*] checking {provider} subscription login… ");
+    use std::io::Write; let _ = std::io::stdout().flush();
+    match harness::models::cli_login_status(&provider).await {
+        harness::models::LoginStatus::LoggedIn => println!("\r  [*] {provider} subscription: logged in ✓            "),
+        harness::models::LoginStatus::NotLoggedIn => {
+            let cli = harness::models::cli_binary_for(&provider).unwrap_or("the CLI");
+            println!("\r  \x1b[1;33m[!] {provider} subscription NOT logged in\x1b[0m — run `{cli}` and log in (e.g. `claude` → /login), then retry.");
+            println!("      \x1b[2m(without login every agent returns empty — this is usually why a run finds 0.)\x1b[0m");
+        }
+        harness::models::LoginStatus::NotInstalled => {
+            let cli = harness::models::cli_binary_for(&provider).unwrap_or("?");
+            println!("\r  \x1b[1;33m[!] subscription CLI `{cli}` for {provider} is not installed\x1b[0m — install it or use an API key (drop --subscription).");
+        }
+        harness::models::LoginStatus::Unknown => println!("\r  [*] {provider} subscription: login state unknown (continuing)   "),
+    }
+}
+
 /// Set up + start an engagement (synchronous setup; the work runs in the task).
 pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode: Mode) -> Spawned {
     let lib = agents::load(base);
@@ -666,6 +692,7 @@ pub(crate) fn finalize_run(mut out: RunOutput, workdir: &Path) -> RunOutput {
 }
 
 async fn run_mode(base: &Path, cfg: RunConfig, mcp: bool, mode: Mode) -> anyhow::Result<RunOutput> {
+    subscription_preflight(&cfg).await;
     let Spawned { mut task, mut rx, cancel, workdir, .. } = spawn_engagement(base, cfg, mcp, mode);
     let printer = tokio::spawn(async move {
         while let Some(line) = rx.recv().await { render_line(&line); }

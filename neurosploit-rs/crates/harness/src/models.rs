@@ -201,8 +201,14 @@ impl ChatClient {
             "codex" => {
                 cmd.arg("exec").arg("--model").arg(model)
                     .arg("--dangerously-bypass-approvals-and-sandbox");
+                // Codex takes MCP servers as `-c mcp_servers.<name>....` TOML
+                // overrides, NOT a config-file path. Read our .mcp.json and inject
+                // each server's command/args so the browser MCP actually loads.
                 if let Some(mcp) = mcp_config {
-                    cmd.arg("--config").arg(format!("mcp_config_file={mcp}"));
+                    for (name, cmdline, args) in mcp_servers_from(mcp) {
+                        cmd.arg("-c").arg(format!("mcp_servers.{name}.command={cmdline}"));
+                        cmd.arg("-c").arg(format!("mcp_servers.{name}.args={args}"));
+                    }
                 }
                 cmd.arg("-");
             }
@@ -372,6 +378,25 @@ fn tool_event(name: &str, input: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Parse an `.mcp.json` (`{ "mcpServers": { name: { command, args } } }`) into
+/// `(name, command, args_json)` tuples — used to inject servers into Codex's
+/// `-c mcp_servers.*` TOML overrides (Codex has no config-file flag).
+fn mcp_servers_from(path: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let Ok(txt) = std::fs::read_to_string(path) else { return out };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { return out };
+    let servers = v.get("mcpServers").cloned().unwrap_or(v);
+    if let Some(obj) = servers.as_object() {
+        for (name, s) in obj {
+            let command = s.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            if command.is_empty() { continue; }
+            let args = s.get("args").cloned().unwrap_or(serde_json::json!([]));
+            out.push((name.clone(), command, args.to_string()));
+        }
+    }
+    out
+}
+
 /// Map a provider to its local agentic CLI binary (subscription backend).
 pub fn cli_binary_for(provider: &str) -> Option<&'static str> {
     match provider {
@@ -393,6 +418,54 @@ pub fn binary_in_path(name: &str) -> bool {
 /// Which subscription CLI backends are installed locally.
 pub fn installed_cli_backends() -> Vec<&'static str> {
     ["claude", "codex", "grok", "gemini"].into_iter().filter(|b| binary_in_path(b)).collect()
+}
+
+/// Login state of a subscription CLI backend.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoginStatus {
+    NotInstalled,
+    LoggedIn,
+    NotLoggedIn,
+    Unknown, // installed but couldn't determine (timeout / weird output)
+}
+
+/// Check whether a subscription CLI is installed AND logged in, by sending it a
+/// trivial prompt and inspecting the reply. Cheap (a few tokens) and bounded by a
+/// short timeout. Detects the common "not authenticated / please login / no
+/// credit" errors so the operator is warned before a whole run comes back empty.
+pub async fn cli_login_status(provider: &str) -> LoginStatus {
+    let Some(bin) = cli_binary_for(provider) else { return LoginStatus::NotInstalled };
+    if !binary_in_path(bin) { return LoginStatus::NotInstalled; }
+    let mut cmd = Command::new(bin);
+    match bin {
+        "claude" => { cmd.arg("-p").arg("--output-format").arg("text").arg("--dangerously-skip-permissions"); }
+        "codex" => { cmd.arg("exec").arg("--dangerously-bypass-approvals-and-sandbox").arg("-"); }
+        _ => { cmd.arg("-p"); } // grok / gemini: prompt on stdin
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    let mut child = match cmd.spawn() { Ok(c) => c, Err(_) => return LoginStatus::Unknown };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"Reply with exactly: OK").await;
+    }
+    let out = match tokio::time::timeout(Duration::from_secs(45), child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        _ => return LoginStatus::Unknown,
+    };
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).to_lowercase();
+    let auth_err = ["not logged in", "please log in", "please login", "run /login", "authenticate",
+        "authentication", "unauthorized", "not authenticated", "no credit", "credit balance",
+        "invalid api key", "no api key", "sign in", "session expired", "logged out"];
+    if auth_err.iter().any(|k| text.contains(k)) {
+        return LoginStatus::NotLoggedIn;
+    }
+    if out.status.success() && text.contains("ok") {
+        return LoginStatus::LoggedIn;
+    }
+    // Produced *some* non-auth output → almost certainly usable.
+    if out.status.success() && !text.trim().is_empty() {
+        return LoginStatus::LoggedIn;
+    }
+    LoginStatus::Unknown
 }
 
 /// Does this provider's agentic CLI accept a Playwright MCP config?
@@ -418,10 +491,21 @@ pub fn ensure_playwright_mcp() -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    match out {
-        Ok(_) => Ok(()),
-        Err(e) => Err(anyhow!("could not provision @playwright/mcp via npx: {e}")),
+    if let Err(e) = out {
+        return Err(anyhow!("could not provision @playwright/mcp via npx: {e}"));
     }
+    // Ensure the Chromium browser the MCP server drives is actually installed —
+    // otherwise the FIRST browser action fails/hangs and the agent gives up with
+    // no findings (a very common "MCP doesn't execute" cause). Best-effort,
+    // skippable via NEUROSPLOIT_SKIP_BROWSER_INSTALL=1; non-fatal on failure.
+    if std::env::var("NEUROSPLOIT_SKIP_BROWSER_INSTALL").ok().as_deref() != Some("1") {
+        let _ = std::process::Command::new("npx")
+            .args(["-y", "playwright", "install", "chromium"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    Ok(())
 }
 
 /// Write an `.mcp.json` into `dir` (Playwright by default) and return its path,

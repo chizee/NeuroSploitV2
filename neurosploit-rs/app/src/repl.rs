@@ -830,6 +830,7 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
     cfg.auth = s.auth.clone();
     if matches!(mode_e, crate::Mode::Grey) { cfg.repo = s.repo.clone(); }
     crate::apply_creds(&mut cfg, s.creds.as_deref()).await;
+    crate::subscription_preflight(&cfg).await; // warn early if the CLI isn't logged in
 
     let mut printer = reader.external_printer()?; // None on piped stdin → blocking fallback
     let sp = crate::spawn_engagement(base, cfg, mcp, mode_e);
@@ -848,6 +849,7 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
     let choice = Arc::new(Mutex::new(StopMode::Run));
     let soft_task = soft.clone(); // idle guardrail triggers a soft-stop (validate)
     let cancel_task = cancel.clone();
+    let sub_mcp = s.subscription && mcp; // for the "browser/tools never engaged" diagnostic
     let (live2, done2, hist2, choice2) = (live.clone(), done.clone(), history, choice.clone());
 
     tokio::spawn(async move {
@@ -855,6 +857,7 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
         let mut last_saved = 0usize;
         let mut last_find = Instant::now(); // time of the last NEW finding
         let mut idle_fired = false;
+        let mut tool_events = 0usize; // exec/net/read/browser activity seen
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -862,6 +865,7 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
                 maybe = rx.recv() => {
                     let Some(line) = maybe else { break };
                     live2.lock().unwrap().ingest(&line);
+                    if line.contains("exec:") || line.contains("net:") || line.contains("read:") || line.contains("browser") { tool_events += 1; }
                     if let Some(out) = crate::render_compact(&line) { let _ = printer.print(out); }
                     // Checkpoint on each new finding; also resets the idle clock.
                     let snap = {
@@ -895,6 +899,13 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
         }
         let task_out = task.await.unwrap_or_default();
         let mode_choice = *choice2.lock().unwrap();
+
+        // Diagnostic: subscription + MCP but the agents never ran a single tool/
+        // browser action → the CLI almost certainly isn't logged in (or the MCP
+        // didn't engage), which is why nothing was found.
+        if sub_mcp && tool_events == 0 {
+            let _ = printer.print("\x1b[1;33m[!] no browser/tool activity was observed this run — the subscription CLI is likely NOT logged in (run `claude` → /login) or the Playwright MCP didn't start. That's usually why a run finds 0.\x1b[0m".to_string());
+        }
 
         if mode_choice == StopMode::Discard {
             std::fs::remove_dir_all(&workdir).ok();
