@@ -1,4 +1,4 @@
-//! NeuroSploit v3.5.6 — interactive session (Claude-Code / Codex / Cursor-CLI style).
+//! NeuroSploit v3.6.0 — interactive session (Claude-Code / Codex / Cursor-CLI style).
 //!
 //! Launched when `neurosploit` runs with no subcommand. A persistent REPL with
 //! real line editing (arrow-key history recall, Ctrl-A/E/K, paste), model
@@ -117,7 +117,7 @@ struct LiveCheckpoint {
 
 /// All slash-commands, for Tab completion.
 const COMMANDS: &[&str] = &[
-    "/help", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
+    "/help", "/onboard", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
     "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
     "/votes", "/chain", "/timeout", "/proxy", "/burp", "/ua", "/agents", "/theme", "/clear", "/run", "/stop", "/continue", "/runs", "/results", "/report",
     "/status", "/diff", "/retest", "/validate", "/finding", "/expand", "/integrations", "/quit",
@@ -231,6 +231,8 @@ struct Session {
     instructions: Option<String>,
     attachments: Vec<String>,
     color: bool,
+    /// Engagement scope from onboarding: web | infra | cloud | ai | skills.
+    scope: &'static str,
 }
 
 impl Default for Session {
@@ -254,6 +256,7 @@ impl Default for Session {
             instructions: None,
             attachments: Vec::new(),
             color: true,
+            scope: "web",
         }
     }
 }
@@ -329,7 +332,7 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     let backends = harness::installed_cli_backends();
     println!("\x1b[1m");
     println!("  ███╗   ██╗███████╗██╗   ██╗██████╗  ██████╗");
-    println!("  ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗   NeuroSploit v3.5.6");
+    println!("  ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗   NeuroSploit v3.6.0");
     println!("  ██╔██╗ ██║█████╗  ██║   ██║██████╔╝██║   ██║   interactive harness");
     println!("  ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██║   ██║   by Joas A Santos");
     println!("  ██║ ╚████║███████╗╚██████╔╝██║  ██║╚██████╔╝   & Red Team Leaders");
@@ -367,6 +370,10 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     let mut reader = Reader::new(base);
     let mut active: Option<ActiveRun> = None;
     let mut queue: Vec<String> = Vec::new(); // remaining targets for a multi-target /run
+    // First-launch onboarding: pick scope (web/infra/cloud/ai/skills) → box → setup.
+    if s.target.is_none() && s.repo.is_none() && std::io::stdin().is_terminal() {
+        onboarding(&mut s);
+    }
     show(&s);
 
     loop {
@@ -428,6 +435,7 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                         p.models.iter().map(|m| format!("{}:{}", p.key, m)).collect::<Vec<_>>().join("  "));
                 }
             }
+            "/onboard" | "/scope" => onboarding(&mut s),
             "/model" | "/models" => {
                 if arg.is_empty() {
                     pick_models(&mut s);
@@ -763,6 +771,71 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
 }
 
 /// Arrow-key multi-select of models from the catalog (interactive terminals only).
+/// Onboarding wizard: pick WHAT you're testing (scope) → box type → set it up.
+/// Sets s.scope + target/repo/creds hints so a plain `/run` does the right thing.
+fn onboarding(s: &mut Session) {
+    if !std::io::stdin().is_terminal() { return; }
+    let cats = [
+        "Web & API              (a website / REST / GraphQL — black/grey/white-box)",
+        "Infrastructure & Networks  (an IP / host — Linux / Windows / Active Directory)",
+        "Cloud                  (AWS / GCP / Azure account via creds.yaml)",
+        "AI Agents & LLMs       (a live AI/LLM/MCP endpoint, OWASP LLM Top 10)",
+        "AI Skills / Plugins / n8n  (audit exported files — white-box)",
+        "Skip — I'll configure manually",
+    ];
+    let ci = match dialoguer::Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("What are you testing? (onboarding — Esc to skip)")
+        .items(&cats).default(0).interact_opt() {
+        Ok(Some(i)) => i, _ => { println!("  (skipped onboarding — /onboard to run it again)"); return; }
+    };
+    match ci {
+        0 => { // Web & API
+            let boxes = ["Black-box (only a URL)", "White-box (source code)", "Grey-box (URL + source code)"];
+            let bi = dialoguer::Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Box type").items(&boxes).default(0).interact_opt().ok().flatten().unwrap_or(0);
+            s.scope = "web";
+            if bi == 0 || bi == 2 {
+                let u = ask_line("  Target URL:"); if !u.trim().is_empty() {
+                    let u = if u.starts_with("http") { u.trim().to_string() } else { format!("https://{}", u.trim()) };
+                    s.target = Some(u);
+                }
+            }
+            if bi == 1 || bi == 2 {
+                let p = ask_line("  Source repo (path or GitHub URL):"); if !p.trim().is_empty() { s.repo = Some(p.trim().to_string()); }
+            }
+            println!("  ✓ web ({}) — /run to launch (add /auth, /creds, /focus as needed).",
+                ["black-box","white-box","grey-box"][bi.min(2)]);
+        }
+        1 => { // Infra
+            s.scope = "infra";
+            let t = ask_line("  Target host/IP:"); if !t.trim().is_empty() { s.target = Some(t.trim().to_string()); }
+            let c = ask_line("  creds.yaml path (ssh:/windows: blocks) [enter to skip]:"); if !c.trim().is_empty() { s.creds = Some(c.trim().to_string()); }
+            println!("  ✓ infra/host — /run to launch (Linux/Windows/AD agents).");
+        }
+        2 => { // Cloud
+            s.scope = "cloud";
+            let t = ask_line("  Cloud account label / target:"); s.target = Some(if t.trim().is_empty() { "cloud-account".into() } else { t.trim().to_string() });
+            let c = ask_line("  creds.yaml path (aws:/gcp:/azure: blocks):"); if !c.trim().is_empty() { s.creds = Some(c.trim().to_string()); }
+            println!("  ✓ cloud — set aws:/gcp:/azure: in creds.yaml, then /run.");
+        }
+        3 => { // AI live
+            s.scope = "ai";
+            let u = ask_line("  AI agent / LLM / MCP endpoint URL:"); if !u.trim().is_empty() {
+                let u = if u.starts_with("http") { u.trim().to_string() } else { format!("https://{}", u.trim()) };
+                s.target = Some(u);
+            }
+            let a = ask_line("  Auth header for the endpoint [enter to skip]:"); if !a.trim().is_empty() { s.auth = Some(normalize_auth(a.trim())); }
+            println!("  ✓ ai/llm — /run tests OWASP LLM Top 10 + MCP against the endpoint.");
+        }
+        4 => { // Skills / n8n audit (white-box files)
+            s.scope = "skills";
+            let p = ask_line("  Skill/plugin/n8n file or folder (.md/.json):"); if !p.trim().is_empty() { s.repo = Some(p.trim().to_string()); }
+            println!("  ✓ skills/n8n audit — /run audits the exported definition(s).");
+        }
+        _ => { s.scope = "web"; println!("  (manual setup — use /target /repo /creds /auth then /run)"); }
+    }
+}
+
 fn pick_models(s: &mut Session) {
     if !std::io::stdin().is_terminal() {
         println!("  current: {} (use /model <provider:model,...> to set)", s.models.join(", "));
@@ -907,11 +980,26 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
                           history: Arc<Mutex<Vec<RunRecord>>>, target_override: Option<&str>) -> Option<ActiveRun> {
     // `target_override` runs one specific URL (used by the multi-target queue).
     let ov = target_override.map(|t| t.to_string());
-    let (target, mode_s, mode_e, mcp) = match (&s.repo, ov.as_ref().or(s.target.as_ref())) {
-        (Some(_), Some(t)) => (t.clone(), "greybox", crate::Mode::Grey, s.mcp),
-        (Some(r), None) => (r.clone(), "white-box", crate::Mode::White, false),
-        (None, Some(t)) => (t.clone(), "black-box", crate::Mode::Black, s.mcp),
-        _ => { println!("  \x1b[31m✗ set a /target <url> and/or /repo <path> first.\x1b[0m"); return None; }
+    // The onboarding scope steers infra/cloud/ai/skills; otherwise web black/white/grey.
+    let (target, mode_s, mode_e, mcp) = match s.scope {
+        "infra" | "cloud" => match ov.as_ref().or(s.target.as_ref()) {
+            Some(t) => (t.clone(), if s.scope == "cloud" { "cloud" } else { "host/infra" }, crate::Mode::Host, false),
+            None => { println!("  \x1b[31m✗ set a /target <ip|host|cloud-account> first (and /creds).\x1b[0m"); return None; }
+        },
+        "ai" => match ov.as_ref().or(s.target.as_ref()) {
+            Some(t) => (t.clone(), "ai/llm", crate::Mode::Ai, false),
+            None => { println!("  \x1b[31m✗ set the AI endpoint with /target <url> first.\x1b[0m"); return None; }
+        },
+        "skills" => match s.repo.as_ref().or(s.target.as_ref()) {
+            Some(p) => (p.clone(), "skills/n8n", crate::Mode::Skills, false),
+            None => { println!("  \x1b[31m✗ set the skill/n8n file or folder with /repo <path> first.\x1b[0m"); return None; }
+        },
+        _ => match (&s.repo, ov.as_ref().or(s.target.as_ref())) {
+            (Some(_), Some(t)) => (t.clone(), "greybox", crate::Mode::Grey, s.mcp),
+            (Some(r), None) => (r.clone(), "white-box", crate::Mode::White, false),
+            (None, Some(t)) => (t.clone(), "black-box", crate::Mode::Black, s.mcp),
+            _ => { println!("  \x1b[31m✗ set a /target <url> and/or /repo <path> first.\x1b[0m"); return None; }
+        },
     };
     let idle_secs = s.idle_secs;
     let mut cfg = RunConfig::new(&target);
@@ -1355,13 +1443,20 @@ fn run_status(history: &[RunRecord], arg: &str) {
 }
 
 fn show(s: &Session) {
-    let mode = match (&s.repo, &s.target) {
-        (Some(_), Some(_)) => "greybox (code + live)",
-        (Some(_), None) => "white-box (code)",
-        (None, Some(_)) => "black-box (live)",
-        _ => "(set /target and/or /repo)",
+    let mode = match s.scope {
+        "infra" => "infra/host (Linux/Windows/AD)",
+        "cloud" => "cloud (AWS/GCP/Azure)",
+        "ai" => "ai/llm (OWASP LLM Top 10 + MCP)",
+        "skills" => "skills/n8n audit (white-box files)",
+        _ => match (&s.repo, &s.target) {
+            (Some(_), Some(_)) => "greybox (code + live)",
+            (Some(_), None) => "white-box (code)",
+            (None, Some(_)) => "black-box (live)",
+            _ => "(set /target and/or /repo — or /onboard)",
+        },
     };
     println!("  ┌─ session");
+    println!("  │  scope    : {} \x1b[2m(/onboard to change)\x1b[0m", s.scope);
     println!("  │  models   : {}", s.models.join(", "));
     println!("  │  auth mode: {}", if s.subscription { "subscription (CLI login)" } else { "API key" });
     println!("  │  mode     : {mode}");
@@ -1403,8 +1498,9 @@ fn help() {
     println!("\n  \x1b[1mNeuroSploit REPL — commands\x1b[0m");
 
     println!("\n  \x1b[2mTARGET & SCOPE\x1b[0m");
-    h("/target <url[,..]>", "black-box target URL (comma-separated = multi-target, sequential)");
-    h("/repo <path|url>",   "analyse a repo — path or GitHub URL (repo + target = greybox)");
+    h("/onboard",           "guided setup: pick scope (web · infra · cloud · ai/llm · skills/n8n)");
+    h("/target <url[,..]>", "black-box target / AI endpoint / host (comma-separated = multi-target)");
+    h("/repo <path|url>",   "source repo (greybox) OR skill/n8n file/folder to audit (skills scope)");
     h("/auth <value>",      "auth header (Bearer/cookie/key). Roles: /auth admin <hdr> · /auth user <hdr>");
     h("/creds <file.yaml>", "creds: jwt/header/cookie/login + ssh/windows + aws/gcp/azure + roles");
     h("/focus <text>",      "steer the tests (or just type the instruction)");

@@ -1,4 +1,4 @@
-<h1 align="center">🧠 NeuroSploit v3.5.6</h1>
+<h1 align="center">🧠 NeuroSploit v3.6.0</h1>
 
 <p align="center">
   <a href="https://trendshift.io/repositories/22624?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-22624" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/22624/daily?language=Python" alt="JoasASantos%2FNeuroSploit | Trendshift" width="250" height="55"/></a>
@@ -12,10 +12,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.5.6-blue?style=flat-square">
+  <img src="https://img.shields.io/badge/Version-3.6.0-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Harness-Rust%20%7C%20tokio-e6b673?style=flat-square">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
-  <img src="https://img.shields.io/badge/MD%20Agents-399-red?style=flat-square">
+  <img src="https://img.shields.io/badge/MD%20Agents-417-red?style=flat-square">
   <img src="https://img.shields.io/badge/Models-14%20providers-success?style=flat-square">
   <img src="https://img.shields.io/badge/Modes-Black%20%7C%20White%20%7C%20Grey%20%7C%20Host-9cf?style=flat-square">
   <img src="https://img.shields.io/badge/Auth-API%20key%20%7C%20Subscription-orange?style=flat-square">
@@ -28,7 +28,7 @@
 >
 > 📖 **New here? Read the [full Tutorial & User Guide →](TUTORIAL.md)** — every mode, flag, config and example explained.
 
-> 🆕 **New in v3.5.6 — Cloud testing + REPL navigation + deeper recon:**
+> 🆕 **New in v3.6.0 — Cloud testing + REPL navigation + deeper recon:**
 > **AWS/GCP/Azure** agents (+17 → **375** total) with credentials wired through
 > `creds.yaml`; a more navigable **REPL** — **`/timeout`** idle guardrail,
 > **multi-target** `/target a,b,c` (sequential), an interactive **`/results`**
@@ -48,7 +48,7 @@ LLMs** — via **API key** or local **subscription** (Claude Code / Codex / Gemi
 Grok) — recons the target, **intelligently selects only the agents that match the
 discovered surface**, runs them in parallel, **chains** findings into deeper
 impact, and **validates every claim by cross-model voting + tool-receipt
-grounding** before reporting. It ships **399 markdown agents** and a **Mission
+grounding** before reporting. It ships **417 markdown agents** and a **Mission
 Control TUI**.
 
 ### Engagement modes

@@ -1,3 +1,52 @@
+# NeuroSploit v3.6.0 — Release Notes
+
+**Release Date:** July 2026
+**Codename:** AI / LLM / Agent / MCP / Skills Security
+**License:** MIT
+**Credits:** Joas A Santos & Red Team Leaders
+
+---
+
+## TL;DR
+
+v3.6.0 turns NeuroSploit into an **AI-security** platform: red-team live AI
+agents / LLM apps / MCP endpoints against the **OWASP Top 10 for LLM Apps (2025)**
++ MCP threats, audit **AI Skills/plugins and exported n8n workflows** white-box,
+and pick your engagement type up front in a new **onboarding wizard**. Library
+**417** agents. Adds **Claude Sonnet 5** and **Grok 4.5**.
+
+## AI / LLM / Agent / MCP / Skills testing (+18 agents, `agents_md/ai/`)
+
+- **Live AI red-team** — `neurosploit aitest <url>` (or the `ai` scope in the
+  REPL). Point it at an AI agent / LLM chat or API / MCP endpoint; agents cover
+  the full **OWASP LLM Top 10 (2025)**: prompt injection (direct + indirect),
+  jailbreaks, system-prompt leakage, sensitive-info disclosure, improper output
+  handling, excessive agency, RAG/embedding weaknesses, unbounded consumption,
+  supply chain, misinformation — hackagent.dev-style, with the exact prompt +
+  the model's response as proof. Plus **MCP risks**: tool poisoning / description
+  injection, excessive permissions & confused-deputy, unsafe tool execution.
+- **Skills / plugins / n8n audit (white-box)** — `neurosploit skills <file|dir>`
+  (or the `skills` scope). Audit a single `.md`/`.json` or a whole folder:
+  - **Skills/plugins**: insecure design, secrets in manifests, over-broad tools,
+    injection surface, missing human-in-the-loop.
+  - **n8n exported workflows**: hardcoded credentials, unsafe Code/Function
+    nodes (RCE/SSRF), unauthenticated webhooks, expression injection, over-scoped
+    credentials — **and a dedicated AI/LLM-node audit** (prompt injection, data
+    leakage to the provider, excessive agency, insecure output handling).
+
+## Onboarding wizard
+
+- On first launch (or `/onboard`), a guided menu asks **what you're testing** —
+  **Web & API · Infrastructure & Networks · Cloud · AI Agents & LLMs · AI
+  Skills/Plugins/n8n** — then the box type (black/white/grey for web) and the
+  minimal setup, so a plain `/run` does the right thing. Scope shown in `/show`.
+
+## Models
+
+- Added **`anthropic:claude-sonnet-5`** and **`xai:grok-4.5`**.
+
+---
+
 # NeuroSploit v3.5.6 — Release Notes
 
 **Release Date:** July 2026

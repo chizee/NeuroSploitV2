@@ -1,4 +1,4 @@
-//! NeuroSploit v3.5.6 — interactive harness + CLI (`run` / `whitebox` / `agents` / `models`).
+//! NeuroSploit v3.6.0 — interactive harness + CLI (`run` / `whitebox` / `agents` / `models`).
 
 mod repl;
 mod tui;
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "neurosploit",
     version,
-    about = "NeuroSploit v3.5.6 — multi-model autonomous pentest harness",
-    long_about = "NeuroSploit v3.5.6 — a Rust multi-model harness that drives a pool of LLMs \
+    about = "NeuroSploit v3.6.0 — multi-model autonomous pentest harness",
+    long_about = "NeuroSploit v3.6.0 — a Rust multi-model harness that drives a pool of LLMs \
 (API key or local subscription: Claude/Codex/Gemini/Grok) to autonomously test a target. \
 After recon it INTELLIGENTLY selects only the agents matching the discovered surface, runs \
 them in parallel, then validates every finding by cross-model voting before reporting.\n\n\
@@ -176,6 +176,44 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// AI/LLM: red-team a live AI agent / LLM app / MCP endpoint (OWASP LLM Top 10 + MCP risks).
+    Aitest {
+        /// URL of the AI agent / LLM chat or API endpoint.
+        url: String,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Auth header for the AI endpoint (e.g. 'Authorization: Bearer <key>').
+        #[arg(long)]
+        auth: Option<String>,
+        /// Free-text focus, e.g. "prompt injection and excessive agency".
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        max_agents: usize,
+        #[arg(long, default_value_t = 3)]
+        vote_n: usize,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        subscription: bool,
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Audit AI Skills/plugins or exported n8n workflows (white-box .md/.json file or folder).
+    Skills {
+        /// Path to a skill/plugin/n8n file (.md/.json) or a folder of them.
+        path: String,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        #[arg(long, default_value_t = 2)]
+        vote_n: usize,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        subscription: bool,
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Review a GitHub Pull Request's code (clones the PR head, white-box).
     /// Optionally comments back on the PR and/or opens Jira cards per finding.
     Pr {
@@ -299,8 +337,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Agents => {
             let lib = agents::load(&base);
             println!(
-                "{{\"vulns\":{},\"recon\":{},\"code\":{},\"infra\":{},\"chains\":{},\"meta\":{},\"total\":{}}}",
-                lib.vulns.len(), lib.recon.len(), lib.code.len(), lib.infra.len(), lib.chains.len(), lib.meta.len(), lib.total()
+                "{{\"vulns\":{},\"recon\":{},\"code\":{},\"infra\":{},\"chains\":{},\"ai\":{},\"meta\":{},\"total\":{}}}",
+                lib.vulns.len(), lib.recon.len(), lib.code.len(), lib.infra.len(), lib.chains.len(), lib.ai.len(), lib.meta.len(), lib.total()
             );
         }
         Cmd::Models => {
@@ -397,6 +435,31 @@ async fn main() -> anyhow::Result<()> {
             }
             apply_creds(&mut cfg, creds.as_deref()).await;
             let out = run_mode(&base, cfg, false, Mode::Host).await?;
+            print_findings(&out);
+        }
+        Cmd::Aitest { url, models, auth, focus, max_agents, vote_n, offline, subscription, verbose } => {
+            let url = if url.starts_with("http") { url } else { format!("https://{url}") };
+            let mut cfg = RunConfig::new(&url);
+            cfg.max_agents = max_agents;
+            cfg.vote_n = vote_n;
+            cfg.offline = offline;
+            cfg.subscription = subscription;
+            cfg.verbose = verbose;
+            cfg.instructions = focus;
+            cfg.auth = auth;
+            if !models.is_empty() { cfg.models = models; }
+            let out = run_mode(&base, cfg, false, Mode::Ai).await?;
+            print_findings(&out);
+        }
+        Cmd::Skills { path, models, vote_n, offline, subscription, verbose } => {
+            let path = resolve_source(&base, &path)?; // local path OR github URL
+            let mut cfg = RunConfig::new(&path);
+            cfg.vote_n = vote_n;
+            cfg.offline = offline;
+            cfg.subscription = subscription;
+            cfg.verbose = verbose;
+            if !models.is_empty() { cfg.models = models; }
+            let out = run_mode(&base, cfg, false, Mode::Skills).await?;
             print_findings(&out);
         }
         Cmd::Pr { repo, number, models, vote_n, chain_depth, subscription, comment, jira, verbose } => {
@@ -550,7 +613,7 @@ pub(crate) async fn apply_creds(cfg: &mut RunConfig, path: Option<&str>) {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Mode { Black, White, Grey, Host }
+pub(crate) enum Mode { Black, White, Grey, Host, Ai, Skills }
 
 pub(crate) async fn run_greybox_engagement(base: &Path, cfg: RunConfig, mcp: bool) -> anyhow::Result<RunOutput> {
     run_mode(base, cfg, mcp, Mode::Grey).await
@@ -634,7 +697,7 @@ pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode:
     println!("  │  ua     : {ua}");
     write_status(&workdir, "running", &format!("\"target\":{:?}", cfg.target));
 
-    println!("  ┌─ NeuroSploit v3.5.6  ·  by Joas A Santos & Red Team Leaders");
+    println!("  ┌─ NeuroSploit v3.6.0  ·  by Joas A Santos & Red Team Leaders");
     println!("  │  run id : {run_id}");
     println!("  │  target : {}", cfg.target);
     println!("  │  models : {}", cfg.models.join(", "));
@@ -643,7 +706,7 @@ pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode:
         println!("  │  repo   : {}", cfg.repo.clone().unwrap_or_default());
     }
     println!("  └─ mode   : {}{}{}",
-        match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Host => "host/infra", Mode::Black => "black-box" },
+        match mode { Mode::White => "white-box", Mode::Grey => "greybox", Mode::Host => "host/infra", Mode::Ai => "ai/llm", Mode::Skills => "skills/n8n audit", Mode::Black => "black-box" },
         if cfg.subscription { " · subscription" } else { " · api" },
         if mcp { " · mcp" } else { "" });
 
@@ -680,6 +743,8 @@ pub(crate) fn spawn_engagement(base: &Path, mut cfg: RunConfig, mcp: bool, mode:
             Mode::White => harness::run_whitebox(cfg, &lib, &pool, tx).await,
             Mode::Grey => harness::run_greybox(cfg, &lib, &pool, tx).await,
             Mode::Host => harness::run_host(cfg, &lib, &pool, tx).await,
+            Mode::Ai => harness::pipeline::run_ai(cfg, &lib, &pool, tx).await,
+            Mode::Skills => harness::pipeline::run_skills_audit(cfg, &lib, &pool, tx).await,
             Mode::Black => harness::run(cfg, &lib, &pool, tx).await,
         }
     });
