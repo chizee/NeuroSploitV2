@@ -1076,10 +1076,16 @@ pub(crate) fn render_compact(raw: &str) -> Option<String> {
         "ai" => return None, // skip verbose model chatter in background feed
         _ => {
             let low = line.to_lowercase();
-            if low.contains("recon complete") { "\x1b[36m  🔍 recon complete\x1b[0m".into() }
+            // Recon / probe activity — SHOW it so a long recon (esp. via a
+            // non-streaming CLI like codex) doesn't look frozen.
+            if low.starts_with("probe:") { format!("\x1b[36m  🔎 {}\x1b[0m", trunc1(line, 130)) }
+            else if low.contains("recon complete") { "\x1b[36m  🔍 recon complete\x1b[0m".into() }
+            else if low.starts_with("recon") || low.starts_with("ai-recon") || low.contains("recon round") || low.contains("intensity") { format!("\x1b[36m  🔍 {}\x1b[0m", trunc1(line, 130)) }
+            else if low.starts_with("skills audit") || low.starts_with("ai engagement") { format!("\x1b[36m  🤖 {}\x1b[0m", trunc1(line, 130)) }
+            else if low.starts_with("loaded ") || low.starts_with("running ") { format!("\x1b[36m  🧭 {}\x1b[0m", trunc1(line, 130)) }
             else if low.contains("selected") && low.contains("agent") { format!("\x1b[36m  🧭 {}\x1b[0m", trunc1(line, 110)) }
             else if low.starts_with("vote") && low.contains("confirmed") { format!("\x1b[1;32m  ✓ {}\x1b[0m", trunc1(line, 110)) }
-            else if low.starts_with("exploit") || low.starts_with("test ") || low.contains("launching agent") { format!("\x1b[35m  🧪 {}\x1b[0m", trunc1(line, 110)) }
+            else if low.starts_with("exploit") || low.starts_with("test ") || low.starts_with("ai ") || low.starts_with("skill ") || low.contains("launching agent") { format!("\x1b[35m  🧪 {}\x1b[0m", trunc1(line, 110)) }
             else if low.starts_with("vote") { format!("\x1b[2m  · {}\x1b[0m", trunc1(line, 110)) }
             else if low.contains("fail") || low.contains("error") { format!("\x1b[31m  ✗ {}\x1b[0m", trunc1(line, 110)) }
             else { return None; }

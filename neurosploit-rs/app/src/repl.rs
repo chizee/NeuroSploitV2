@@ -50,7 +50,7 @@ impl RunLive {
         let low = line.to_lowercase();
         if low.contains("token/quota exhausted") || low.contains("run is paused") { self.phase = "paused (quota)".into(); }
         else if low.contains("resumed — retrying") { self.phase = "exploiting".into(); }
-        else if low.contains("recon complete") { self.phase = "recon".into(); }
+        else if low.starts_with("recon") || low.starts_with("ai-recon") || low.contains("recon round") || low.contains("intensity") || low.starts_with("probe:") { self.phase = "recon".into(); }
         else if low.contains("selected") && low.contains("agent") {
             self.phase = "planning".into();
             if let Some(n) = line.split_whitespace().find_map(|t| t.parse::<usize>().ok()) { self.agents = n; }
@@ -1051,9 +1051,10 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
     tokio::spawn(async move {
         let crate::Spawned { task, mut rx, workdir, .. } = sp;
         let mut last_saved = 0usize;
-        let mut last_find = Instant::now(); // time of the last NEW finding
+        let mut last_activity = Instant::now(); // last sign of PROGRESS (any activity)
         let mut idle_fired = false;
         let mut tool_events = 0usize; // exec/net/read/browser activity seen
+        let mut exploiting = false;   // guardrail only arms once exploitation starts
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1061,14 +1062,20 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
                 maybe = rx.recv() => {
                     let Some(line) = maybe else { break };
                     live2.lock().unwrap().ingest(&line);
+                    let low = line.to_lowercase();
                     if line.contains("exec:") || line.contains("net:") || line.contains("read:") || line.contains("browser") { tool_events += 1; }
+                    // ANY streamed line is progress → reset the idle clock (a long
+                    // recon or active tool use must NOT count as idle).
+                    last_activity = Instant::now();
+                    // Exploitation has begun once agents launch / vote — only then arm the guardrail.
+                    if low.contains("launching agent") || low.starts_with("exploit ") || low.starts_with("test ")
+                        || low.starts_with("ai ") || low.starts_with("skill ") || low.starts_with("vote") { exploiting = true; }
                     if let Some(out) = crate::render_compact(&line) { let _ = printer.print(out); }
-                    // Checkpoint on each new finding; also resets the idle clock.
+                    // Checkpoint on each new finding.
                     let snap = {
                         let l = live2.lock().unwrap();
                         if l.full.len() != last_saved {
                             last_saved = l.full.len();
-                            last_find = Instant::now();
                             Some(LiveCheckpoint {
                                 target: l.target.clone(), mode: l.mode.into(), phase: l.phase.clone(),
                                 workdir: workdir.display().to_string(),
@@ -1079,15 +1086,16 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
                     if let Some(c) = snap { save_checkpoint(&c); }
                 }
                 _ = ticker.tick() => {
-                    // Idle guardrail: no NEW finding within the window → soft-stop
-                    // (stop launching exploit agents, validate what was found).
-                    if idle_secs > 0 && !idle_fired && last_find.elapsed().as_secs() >= idle_secs
+                    // Idle guardrail: only after exploitation started AND no activity
+                    // (not just no finding) within the window → soft-stop & validate.
+                    // Recon never trips it — it streams progress lines that reset the clock.
+                    if idle_secs > 0 && !idle_fired && exploiting && last_activity.elapsed().as_secs() >= idle_secs
                         && !soft_task.load(Ordering::Relaxed) && !cancel_task.load(Ordering::Relaxed) {
                         idle_fired = true;
                         *choice2.lock().unwrap() = StopMode::Validate;
                         soft_task.store(true, Ordering::Relaxed);
                         let _ = printer.print(format!(
-                            "\x1b[33m⏹ idle guardrail: no new finding in {} min — stopping & validating what was found\x1b[0m",
+                            "\x1b[33m⏹ idle guardrail: no activity in {} min — stopping & validating what was found\x1b[0m",
                             idle_secs / 60));
                     }
                 }
