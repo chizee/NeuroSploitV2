@@ -33,6 +33,9 @@ struct RunLive {
     commands: Vec<String>,           // full untruncated commands for /expand & Ctrl+O
     agents: usize,
     agents_done: usize,
+    last: String,                    // last meaningful activity line (sign of life)
+    lines: usize,                    // total streamed lines (activity counter)
+    feed: Vec<String>,               // recent raw activity lines for /logs (capped)
 }
 impl RunLive {
     /// progress fraction in [0,1] (agents completed / total selected).
@@ -48,6 +51,15 @@ impl RunLive {
     }
     fn ingest(&mut self, line: &str) {
         let low = line.to_lowercase();
+        self.lines += 1;
+        // Keep a compact activity trail for /logs and the /status sign-of-life
+        // (skip the machine-only finding_json/ai/tokens noise).
+        if !low.starts_with("finding_json:") && !low.starts_with("@") && !low.contains("ai:") && !low.starts_with("tokens:") {
+            let clean: String = line.chars().take(160).collect();
+            self.last = clean.clone();
+            self.feed.push(clean);
+            if self.feed.len() > 200 { self.feed.remove(0); }
+        }
         if low.contains("token/quota exhausted") || low.contains("run is paused") { self.phase = "paused (quota)".into(); }
         else if low.contains("resumed — retrying") { self.phase = "exploiting".into(); }
         else if low.starts_with("recon") || low.starts_with("ai-recon") || low.contains("recon round") || low.contains("intensity") || low.starts_with("probe:") { self.phase = "recon".into(); }
@@ -120,7 +132,7 @@ const COMMANDS: &[&str] = &[
     "/help", "/onboard", "/show", "/config", "/providers", "/model", "/key", "/sub", "/target",
     "/repo", "/auth", "/creds", "/focus", "/attach", "/context", "/mcp", "/offline",
     "/votes", "/chain", "/recon", "/timeout", "/proxy", "/burp", "/ua", "/agents", "/theme", "/clear", "/run", "/stop", "/continue", "/runs", "/results", "/report",
-    "/status", "/diff", "/retest", "/validate", "/finding", "/expand", "/integrations", "/quit",
+    "/status", "/logs", "/diff", "/retest", "/validate", "/finding", "/expand", "/integrations", "/quit",
 ];
 
 /// rustyline helper: Tab-completes `/commands` and `@filesystem-paths`,
@@ -753,15 +765,37 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
                         let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
                         for (sv, _) in &l.findings { *by.entry(sv.as_str()).or_insert(0) += 1; }
                         let sev = if by.is_empty() { "0".into() } else { by.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" ") };
-                        println!("  \x1b[1m▶ live\x1b[0m {} ({}) · phase {} · {:02}:{:02} · {} possible finding(s) [{}]",
-                            l.target, l.mode, l.phase, el / 60, el % 60, l.findings.len(), sev);
+                        println!("  \x1b[1m▶ live\x1b[0m {} ({}) · phase \x1b[36m{}\x1b[0m · {:02}:{:02} · {} finding(s) [{}]",
+                            l.target, l.mode, l.phase, el / 60, el % 60, l.full.len(), sev);
                         if a.paused.load(Ordering::Relaxed) {
                             println!("    \x1b[1;33m⏸ PAUSED — token/quota exhausted. /continue to resume, or /model <provider:model> then /continue to switch.\x1b[0m");
                         }
-                        if l.agents > 0 { println!("    progress \x1b[36m{}\x1b[0m", l.bar(24)); }
-                        for (sv, t) in l.findings.iter().rev().take(5) { println!("    ✦ [{sv}] {t}"); }
+                        // Progress: a real bar once agents are selected; otherwise show the pre-exploit phase.
+                        if l.agents > 0 { println!("    progress \x1b[36m{}\x1b[0m · {} cmd(s) · {} activity line(s)", l.bar(24), l.commands.len(), l.lines); }
+                        else { println!("    \x1b[2m{} — no agents selected yet · {} cmd(s) · {} activity line(s)\x1b[0m", l.phase, l.commands.len(), l.lines); }
+                        // Sign of life: the latest activity line (so a long recon isn't a black box).
+                        if !l.last.is_empty() { println!("    \x1b[2mlast:\x1b[0m {}", trunc(&l.last, 116)); }
+                        for x in l.full.iter().rev().take(5) { println!("    ✦ [{}] {} \x1b[2m({})\x1b[0m", x.severity, x.title, x.endpoint); }
+                        println!("    \x1b[2m/logs — recent activity · /results — browse findings\x1b[0m");
                     }
                     _ => run_status(&history.lock().unwrap(), arg),
+                }
+            }
+            "/logs" | "/log" | "/feed" => {
+                match &active {
+                    Some(a) if !a.done.load(Ordering::Relaxed) => {
+                        let n: usize = arg.trim().parse().unwrap_or(25);
+                        let l = a.live.lock().unwrap();
+                        if l.feed.is_empty() { println!("  (no activity yet — the run is starting/reconning)"); }
+                        else {
+                            println!("  ── recent activity (last {} of {} lines) ──", n.min(l.feed.len()), l.lines);
+                            for line in l.feed.iter().rev().take(n).rev() {
+                                if let Some(out) = crate::render_compact(line) { println!("{out}"); }
+                                else { println!("    \x1b[2m{}\x1b[0m", trunc(line, 116)); }
+                            }
+                        }
+                    }
+                    _ => println!("  no active run — /logs shows the live activity feed while a run streams."),
                 }
             }
             "/quit" | "/exit" | "/q" => {
@@ -1034,7 +1068,7 @@ async fn start_background(base: &Path, s: &Session, reader: &mut Reader,
     let live = Arc::new(Mutex::new(RunLive {
         target: target.clone(), mode: mode_s, phase: "starting".into(),
         started: Instant::now(), findings: vec![], full: vec![], commands: vec![],
-        agents: 0, agents_done: 0,
+        agents: 0, agents_done: 0, last: String::new(), lines: 0, feed: vec![],
     }));
     let cancel = sp.cancel.clone();
     let soft = sp.soft.clone();
@@ -1534,6 +1568,7 @@ fn help() {
     println!("\n  \x1b[2mRUN & MONITOR\x1b[0m");
     h("/run",               "launch (runs in the BACKGROUND — keep typing)");
     h("/status [n]",        "live progress + findings while running (or a past run #)");
+    h("/logs [n]",          "recent activity feed of the running test (recon/tools/findings)");
     h("/stop",              "stop: [1] validate+report  [2] raw report now  [3] discard");
     h("/continue",          "resume a run paused on token/quota (change /model first to switch)");
     h("/results [n]",       "browse findings (target → vuln → detail; Esc = back)");
