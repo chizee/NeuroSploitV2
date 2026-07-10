@@ -1,3 +1,41 @@
+# NeuroSploit v3.5.6 — Release Notes
+
+**Release Date:** July 2026
+**Codename:** Bug-Bounty Corpus & EOL Hunting
+**License:** MIT
+**Credits:** Joas A Santos & Red Team Leaders
+
+---
+
+## TL;DR
+
+v3.5.6 folds real public bug-bounty knowledge into the agent (methodology
+meta-agent + corpus-grounded techniques), adds a full **2FA/MFA bypass** agent
+(one of the most-reported classes in the writeup corpus), and ships the EOL /
+end-of-support hunting and decision-driven exploitation from the 3.5.5 line.
+Library **399** agents.
+
+## Highlights
+
+- **Bug-bounty methodology, grounded in the real corpus.** The
+  `bugbounty_methodology` meta-agent is validated against the actual technique
+  distribution in public writeup collections (Awesome-Bugbounty-Writeups,
+  bug-bounty-reference) — XSS, RCE, CSRF, SSRF, Clickjacking, SQLi, CORS, LFI,
+  **2FA bypass**, subdomain/account takeover, OAuth, race, **SAML** — and now
+  includes explicit **2FA/MFA bypass** and **SAML/SSO** sections.
+- **New `twofa_bypass_techniques` agent** — the full 2FA-bypass playbook (missing
+  rate-limit brute, code reuse/no-expiry, response manipulation, step skipping,
+  null/default codes, backup/remember-me, race, disable-2FA IDOR, SSO side door),
+  with a control-vs-bypass proof and no account lockout.
+- **KingOfBugBounty-style recon** in `RECON_SYS` (subdomains, wayback, gf, param
+  mining, content discovery, classic exposures) — from 3.5.5, degrades to
+  installed tools.
+- Carries the 3.5.5 features: EOL/end-of-support agents, decision-driven deep
+  exploitation, multi-role `/auth`, browser-driven SPA testing, global install.
+- **README**: Trendshift badge added.
+
+---
+
 # NeuroSploit v3.5.5 — Release Notes
 
 **Release Date:** July 2026

@@ -48,6 +48,13 @@ proof over breadth.
   over reflected, blind XSS via a collaborator, and chaining XSS → CSRF token theft →
   account takeover. Prove execution in a real browser.
 - **Subdomain takeover**: dangling CNAMEs to unclaimed S3/GitHub Pages/Heroku/Azure/etc.
+- **2FA/MFA bypass** (very common in the corpus): missing rate-limit on the OTP (brute
+  the 4-6 digit code), code reuse / no expiry, response manipulation (`success:false`→`true`,
+  200 vs 4xx), skipping the 2FA step by going straight to the post-2FA endpoint, backup-code
+  / remember-me abuse, null/blank/`000000` codes, race on verification, and disabling 2FA on
+  another account via IDOR.
+- **SAML/SSO**: signature stripping/wrapping (XSW), unsigned-assertion acceptance, `NameID`
+  tampering to another user, audience/recipient confusion, and replay.
 - **Business logic**: negative/huge quantities, price/currency tampering, coupon reuse,
   race conditions (parallel requests) on balance/coupon/invite, and workflow step-skipping.
 - **Web cache poisoning / deception**: unkeyed headers (`X-Forwarded-Host`, `X-Forwarded-Scheme`)
