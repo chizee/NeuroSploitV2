@@ -194,6 +194,12 @@ impl ChatClient {
         if bin == "claude" {
             return self.chat_claude_stream(label, model, &prompt, mcp_config, progress).await;
         }
+        // Codex exec streams JSONL events (`--json`): commands it runs, agent
+        // messages, file changes, token usage. Surface them live so recon and
+        // exploitation are visible tool-by-tool instead of a silent black box.
+        if bin == "codex" {
+            return self.chat_codex_stream(label, model, &prompt, mcp_config, progress).await;
+        }
 
         let mut cmd = Command::new(bin);
         match bin {
@@ -363,6 +369,136 @@ impl ChatClient {
         }
         if result.is_empty() {
             return Err(anyhow!("claude stream produced no result"));
+        }
+        Ok(result)
+    }
+
+    /// Drive `codex exec --json` and surface its JSONL event stream as a live,
+    /// categorized activity feed (commands, agent messages, file changes, MCP
+    /// tool calls, token usage). The final agent message is returned as the
+    /// result. Mirrors `chat_claude_stream` so Codex runs are just as visible.
+    async fn chat_codex_stream(
+        &self,
+        label: &str,
+        model: &str,
+        prompt: &str,
+        mcp_config: Option<&str>,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<String> {
+        let mut cmd = Command::new("codex");
+        cmd.arg("exec").arg("--json").arg("--model").arg(model)
+            .arg("--dangerously-bypass-approvals-and-sandbox");
+        if let Some(mcp) = mcp_config {
+            for (name, cmdline, args) in mcp_servers_from(mcp) {
+                cmd.arg("-c").arg(format!("mcp_servers.{name}.command={cmdline}"));
+                cmd.arg("-c").arg(format!("mcp_servers.{name}.args={args}"));
+            }
+        }
+        cmd.arg("-");
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| anyhow!("spawn codex failed: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(prompt.as_bytes()).await?;
+            // Drop closes stdin so Codex processes the prompt and exits.
+        }
+        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+        let mut lines = BufReader::new(stdout).lines();
+        let lbl = if label.is_empty() { String::new() } else { format!("@{label} ") };
+        let emit = |s: String| {
+            if let Some(tx) = &progress {
+                let _ = tx.try_send(format!("{lbl}{s}"));
+            }
+        };
+
+        // Last agent_message is the model's final answer; keep every one so a
+        // run that ends on a tool call still returns the most recent reasoning.
+        let mut result = String::new();
+        let read = async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match ty {
+                    "item.started" | "item.completed" => {
+                        let Some(item) = v.get("item") else { continue };
+                        let itype = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match itype {
+                            "command_execution" => {
+                                // Only announce on start (avoid double lines); note failures on completion.
+                                let c = item.get("command").and_then(|x| x.as_str()).unwrap_or("");
+                                // Strip the `/bin/sh -lc '...'` wrapper Codex adds.
+                                let c = c.strip_prefix("/bin/sh -lc ").map(|s| s.trim_matches('\'')).unwrap_or(c);
+                                if ty == "item.started" {
+                                    let danger = c.contains("rm -rf") || c.contains("mkfs")
+                                        || c.contains(":(){") || c.contains("dd if=") || c.contains("> /dev/");
+                                    emit(format!("{}: {}", if danger { "danger" } else { "exec" }, truncate(c, 200)));
+                                } else if let Some(code) = item.get("exit_code").and_then(|x| x.as_i64()) {
+                                    if code != 0 {
+                                        emit(format!("exec: (exit {code}) {}", truncate(c, 120)));
+                                    }
+                                }
+                            }
+                            "agent_message" => {
+                                if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
+                                    let t = t.trim();
+                                    if !t.is_empty() {
+                                        if ty == "item.completed" { result = t.to_string(); }
+                                        emit(format!("ai: {}", truncate(t, 240)));
+                                    }
+                                }
+                            }
+                            "file_change" | "patch" => {
+                                let p = item.get("path").and_then(|x| x.as_str())
+                                    .or_else(|| item.get("file").and_then(|x| x.as_str())).unwrap_or("file");
+                                emit(format!("edit: {p}"));
+                            }
+                            "mcp_tool_call" => {
+                                let name = item.get("tool").and_then(|x| x.as_str())
+                                    .or_else(|| item.get("name").and_then(|x| x.as_str())).unwrap_or("mcp");
+                                emit(format!("tool: {name}"));
+                            }
+                            "web_search" => {
+                                let q = item.get("query").and_then(|x| x.as_str()).unwrap_or("");
+                                emit(format!("net: search {}", truncate(q, 100)));
+                            }
+                            _ => {}
+                        }
+                    }
+                    "turn.completed" => {
+                        let ti = v.pointer("/usage/input_tokens").and_then(|x| x.as_u64());
+                        let to = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64());
+                        if ti.is_some() || to.is_some() {
+                            emit(format!("tokens: in={} out={}", ti.unwrap_or(0), to.unwrap_or(0)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        // Bound the whole streamed turn (matches the buffered path's cap).
+        if tokio::time::timeout(Duration::from_secs(900), read).await.is_err() {
+            return Err(anyhow!("codex stream timed out after 900s"));
+        }
+        let status = child.wait().await.ok();
+        // Drain stderr for auth/rate diagnostics if we got nothing usable.
+        if result.is_empty() {
+            let mut errbuf = String::new();
+            let mut el = BufReader::new(stderr).lines();
+            while let Ok(Some(l)) = el.next_line().await {
+                if !errbuf.is_empty() { errbuf.push('\n'); }
+                errbuf.push_str(&l);
+                if errbuf.len() > 2000 { break; }
+            }
+            let low = errbuf.to_lowercase();
+            let hard = ["not logged in", "please log in", "please login", "run /login",
+                "unauthorized", "not authenticated", "invalid api key", "no api key",
+                "rate limit", "429", "quota", "credit balance", "usage limit"]
+                .iter().any(|k| low.contains(k));
+            let code = status.and_then(|s| s.code()).map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+            if hard || !errbuf.trim().is_empty() {
+                return Err(anyhow!("codex subscription CLI exit {}: {}", code, truncate(errbuf.trim(), 240)));
+            }
+            return Err(anyhow!("codex stream produced no result"));
         }
         Ok(result)
     }

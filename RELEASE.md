@@ -1,13 +1,31 @@
-# NeuroSploit v3.6.1 — Release Notes
+# NeuroSploit v3.6.2 — Release Notes
 
 **Release Date:** July 2026
-**Codename:** GPT-5.6 models
+**Codename:** Live Codex
 **License:** MIT
 **Credits:** Joas A Santos & Red Team Leaders
 
 ---
 
 ## Highlights
+
+- **Codex now streams live, tool-by-tool.** `codex exec` is driven with `--json`
+  and its JSONL event stream is parsed into the same categorized activity feed
+  as Claude Code: every shell command it runs (`exec:`), file edit (`edit:`),
+  MCP tool call (`tool:`), web search (`net:`) and token count appears the moment
+  it happens. A long, intense recon (subfinder → httpx → katana → nmap …) is no
+  longer a silent black box — you watch each tool execute.
+- **`/logs` and `/status` now capture what each agent actually runs.** The
+  activity feed previously dropped the per-agent tool events; it now keeps the
+  actionable ones (commands, network, files, findings) and only filters long
+  model reasoning and token telemetry. `/logs` shows the real command trail;
+  `/status` `last:` shows a true sign-of-life.
+- Failed internal commands surface as `exec: (exit N) <cmd>` instead of
+  silently vanishing, and Codex auth/rate errors are still detected from stderr.
+
+---
+
+## Previously in v3.6.1
 
 - **Added the GPT-5.6 model line** (OpenAI / ChatGPT): `openai:gpt-5.6-sol`
   (frontier / default), `openai:gpt-5.6-terra` (balanced), and

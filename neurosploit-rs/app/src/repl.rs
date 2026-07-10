@@ -1,4 +1,4 @@
-//! NeuroSploit v3.6.1 — interactive session (Claude-Code / Codex / Cursor-CLI style).
+//! NeuroSploit v3.6.2 — interactive session (Claude-Code / Codex / Cursor-CLI style).
 //!
 //! Launched when `neurosploit` runs with no subcommand. A persistent REPL with
 //! real line editing (arrow-key history recall, Ctrl-A/E/K, paste), model
@@ -52,9 +52,16 @@ impl RunLive {
     fn ingest(&mut self, line: &str) {
         let low = line.to_lowercase();
         self.lines += 1;
-        // Keep a compact activity trail for /logs and the /status sign-of-life
-        // (skip the machine-only finding_json/ai/tokens noise).
-        if !low.starts_with("finding_json:") && !low.starts_with("@") && !low.contains("ai:") && !low.starts_with("tokens:") {
+        // Keep a compact activity trail for /logs and the /status sign-of-life.
+        // Streamed agent events are tagged "@label <event>": keep the actionable
+        // ones (commands, net, tools, file edits, phases) so the operator sees
+        // exactly what each agent is running — drop only long model reasoning
+        // (ai:), token telemetry (tokens:), and machine JSON (finding_json:).
+        let payload = line.strip_prefix('@')
+            .and_then(|r| r.split_once(' ').map(|(_, rest)| rest))
+            .unwrap_or(line);
+        let plow = payload.to_lowercase();
+        if !low.starts_with("finding_json:") && !plow.starts_with("ai:") && !plow.starts_with("tokens:") {
             let clean: String = line.chars().take(160).collect();
             self.last = clean.clone();
             self.feed.push(clean);
@@ -346,7 +353,7 @@ pub async fn repl(base: &Path) -> anyhow::Result<()> {
     let backends = harness::installed_cli_backends();
     println!("\x1b[1m");
     println!("  ███╗   ██╗███████╗██╗   ██╗██████╗  ██████╗");
-    println!("  ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗   NeuroSploit v3.6.1");
+    println!("  ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗   NeuroSploit v3.6.2");
     println!("  ██╔██╗ ██║█████╗  ██║   ██║██████╔╝██║   ██║   interactive harness");
     println!("  ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██║   ██║   by Joas A Santos");
     println!("  ██║ ╚████║███████╗╚██████╔╝██║  ██║╚██████╔╝   & Red Team Leaders");
