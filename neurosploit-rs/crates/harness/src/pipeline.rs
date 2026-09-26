@@ -1432,6 +1432,7 @@ async fn attack_chain(pool: &ModelPool, cfg: &RunConfig, recon: &str,
 
     let mut all_new: Vec<Finding> = Vec::new();
     let mut loot: Vec<String> = Vec::new();
+    let mut round_summaries: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = confirmed.iter().map(finding_key).collect();
 
     // Frontier = footholds to expand this round; start with confirmed, best-first.
@@ -1479,6 +1480,25 @@ async fn attack_chain(pool: &ModelPool, cfg: &RunConfig, recon: &str,
             break;
         }
         all_new.extend(validated.clone());
+        round_summaries.push(format!("round {round}: +{} validated finding(s), {} loot item(s) total", validated.len(), loot.len()));
+        // JEV / System One progress checkpoint (the jev-skill agent-checkpoint
+        // pattern): from the 2nd round on, ask a calibrated backend — TypeSafe
+        // or the local Laya shim — whether recent rounds are still productive,
+        // and stop early on a clear loop instead of burning the remaining depth.
+        // Optional: only when a decision backend is active and --typesafe ≠ off.
+        if round >= 2 && round < max_rounds
+            && !std::env::var("NEUROSPLOIT_TYPESAFE").unwrap_or_default().trim().eq_ignore_ascii_case("off")
+        {
+            if let Some(ts) = crate::typesafe::TypeSafe::from_env() {
+                let objective = cfg.objective.clone().unwrap_or_else(|| "maximise proven, chained impact".into());
+                if let Ok((label, p_continue)) = ts.progress_checkpoint(&objective, &round_summaries, round, max_rounds).await {
+                    if label == "stop" && p_continue < 0.5 {
+                        let _ = tx.send(format!("⛓ System One checkpoint ({}): rounds are looping (p_continue {:.2}) — stopping chain early", ts.backend_label(), p_continue)).await;
+                        break;
+                    }
+                }
+            }
+        }
         // Next round expands the freshly-validated footholds, best-first.
         frontier = validated;
         frontier.sort_by_key(|f| std::cmp::Reverse(sev_rank(&f.severity)));

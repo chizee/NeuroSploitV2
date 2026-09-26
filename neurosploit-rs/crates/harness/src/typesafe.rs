@@ -252,6 +252,33 @@ impl TypeSafe {
         Ok(ans.get("inject").and_then(|x| x.noul).unwrap_or(0.0))
     }
 
+    /// Agent progress checkpoint (the jev-skill "goal-drift / stuck-loop"
+    /// pattern): given the objective and the last few round summaries, is the
+    /// engagement still making progress on THIS foothold, or is it looping /
+    /// drifting and better spent elsewhere? A calibrated Choice the chain loop
+    /// can branch on instead of always burning every remaining round.
+    /// Returns (label ∈ {continue, pivot, stop}, p_continue).
+    pub async fn progress_checkpoint(&self, objective: &str, recent: &[String], round: usize, max: usize) -> Result<(String, f64), String> {
+        let mut qs = BTreeMap::new();
+        qs.insert("progress".to_string(), Question::choice(
+            "Given the objective and the recent round summaries, what is the best next move for the autonomous agent on THIS foothold?",
+            &[
+                ("continue", "recent rounds produced new footholds/loot/impact — pressing here is paying off"),
+                ("pivot", "progress stalled here, but the loot/knowledge gathered opens a clearly better direction"),
+                ("stop", "the last rounds repeat the same actions/observations with no new impact — a loop; stop spending rounds here"),
+            ],
+        ));
+        let state = serde_json::json!({
+            "objective": objective,
+            "round": round,
+            "rounds_max": max,
+            "recent_rounds": recent.iter().rev().take(4).rev().map(|s| s.chars().take(400).collect::<String>()).collect::<Vec<_>>(),
+        });
+        let ans = self.evaluate(state, qs).await?;
+        let a = ans.get("progress").cloned().unwrap_or_default();
+        Ok((a.choice.clone().unwrap_or_else(|| "continue".into()), a.p("continue")))
+    }
+
     pub async fn adjudicate(&self, state: serde_json::Value) -> Result<Adjudication, String> {
         let mut qs = BTreeMap::new();
         qs.insert(
@@ -394,6 +421,22 @@ mod tests {
         assert!(split.wants_review(), "no option clears 0.6 — a human should look");
         let clear = Adjudication { verdict: "confirmed".into(), p_confirmed: 0.88, p_needs_review: 0.08, p_rejected: 0.04, confidence: 0.8, impact_demonstrated: 0.9, data_sensitivity: 1.0 };
         assert!(!clear.wants_review());
+    }
+
+    #[test]
+    fn progress_checkpoint_answer_parses_to_a_decision() {
+        // The chain loop reads (label, p_continue) from a Choice over
+        // continue/pivot/stop — the jev-skill agent-checkpoint shape.
+        let raw = r#"{
+            "answers": {
+                "progress": {"choice":"stop","probabilities":{"continue":0.12,"pivot":0.2,"stop":0.68},"confidence":0.7}
+            }
+        }"#;
+        let parsed: ApiResponse = serde_json::from_str(raw).unwrap();
+        let a = &parsed.answers["progress"];
+        assert_eq!(a.choice.as_deref(), Some("stop"));
+        assert!(a.p("continue") < 0.5, "a stalled loop should not read as continue");
+        assert!(a.p("stop") > a.p("continue"));
     }
 
     #[test]

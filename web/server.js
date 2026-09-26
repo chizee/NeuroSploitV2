@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * NeuroSploit v4.2.0 — web console backend.
+ * NeuroSploit v4.2.1 — web console backend.
  *
  * Zero-dependency Node HTTP server that:
  *  - serves the static SPA in ./public
@@ -506,8 +506,34 @@ async function runDetail(id) {
 function safeRunDir(id) {
   if (!/^[a-zA-Z0-9_.-]+$/.test(id)) return null;
   const dir = path.join(RUNS_DIR, id);
-  if (!dir.startsWith(RUNS_DIR)) return null;
+  // Contain the delete to RUNS_DIR: reject anything that resolves out of it
+  // (defence in depth on top of the charset check, which already forbids `/`).
+  if (dir !== RUNS_DIR && !dir.startsWith(RUNS_DIR + path.sep)) return null;
   return dir;
+}
+
+/// Permanently delete one run: its whole directory (findings, evidence, PoCs,
+/// every report artifact) and its remembered engagement name. Returns false if
+/// the id is unsafe or the directory does not exist.
+async function deleteRun(id) {
+  const dir = safeRunDir(id);
+  if (!dir || dir === RUNS_DIR || !fs.existsSync(dir)) return false;
+  await fsp.rm(dir, { recursive: true, force: true });
+  if (engagementNames.delete(id)) {
+    await fsp.mkdir(path.dirname(NAMES_FILE), { recursive: true })
+      .then(() => fsp.writeFile(NAMES_FILE, JSON.stringify(Object.fromEntries(engagementNames), null, 2)))
+      .catch(() => {});
+  }
+  return true;
+}
+
+/// Delete every run under RUNS_DIR (ns-* directories only). Returns the count.
+async function deleteAllRuns() {
+  let ids = [];
+  try { ids = (await fsp.readdir(RUNS_DIR)).filter((d) => d.startsWith('ns-')); } catch { return 0; }
+  let n = 0;
+  for (const id of ids) { if (await deleteRun(id)) n += 1; }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1040,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && m) {
       return serveRunAsset(req, res, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
     }
+    // Delete ALL runs (must come before the single-run matcher below).
+    if (req.method === 'DELETE' && p === '/api/runs') {
+      const n = await deleteAllRuns();
+      return sendJson(res, 200, { ok: true, deleted: n });
+    }
+    m = p.match(/^\/api\/runs\/([^/]+)$/);
+    if (req.method === 'DELETE' && m) {
+      const id = decodeURIComponent(m[1]);
+      const ok = await deleteRun(id);
+      if (!ok) return sendJson(res, 404, { error: 'run not found' });
+      return sendJson(res, 200, { ok: true, deleted: 1, id });
+    }
 
     // ---- exploitation jobs ----
     if (req.method === 'GET' && p === '/api/exploit') {
@@ -1191,7 +1229,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && p === '/api/meta') {
-      return sendJson(res, 200, { version: '4.0.0', binary: BIN, root: ROOT });
+      return sendJson(res, 200, { version: '4.2.1', binary: BIN, root: ROOT });
     }
 
     // ---- providers / API keys (in-memory only, never persisted) ----
@@ -1223,7 +1261,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`NeuroSploit v4.2.0 web console → http://localhost:${PORT}`);
+  console.log(`NeuroSploit v4.2.1 web console → http://localhost:${PORT}`);
   console.log(`  binary : ${BIN || '(not found — build neurosploit-rs first)'}`);
   console.log(`  agents : ${AGENTS_DIR}`);
   console.log(`  runs   : ${RUNS_DIR}`);

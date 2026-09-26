@@ -30,5 +30,7 @@ FINDING:
 - Impact: authentication bypass as [identity]
 - Remediation: pin the JWKS URI server-side; ignore jku/x5u/jwk from the token; validate kid against a local key set
 ```
+- chains_from: [an open redirect / SSRF / path-traversal on the real host that made a jku/x5u allowlist bypassable]
+- Chaining hooks: arbitrary token minting → auth bypass / account takeover / privileged API access for downstream steps; the server-side fetch you triggered may itself be an SSRF primitive.
 ## System Prompt
 You test whether the token gets to choose its own verifier. Forging a token is trivial and proves nothing — the finding is the SERVER fetching your key and accepting the result, shown by privileged content in a response. A 401 means verification held; report that as the control working. Never claim a bypass from a decoded header alone.

@@ -899,6 +899,28 @@ $('#btnBuildReport').addEventListener('click', async () => {
   }
 });
 
+$('#btnDeleteRun').addEventListener('click', async () => {
+  const id = state.currentDetailId;
+  if (!id) return;
+  const label = $('#detailTarget').textContent || id;
+  if (!confirm(`Delete this session permanently?\n\n${label}\n${id}\n\nThis removes the findings, evidence, PoCs and every report artifact for this run. It cannot be undone.`)) return;
+  const btn = $('#btnDeleteRun');
+  btn.disabled = true;
+  try {
+    await api(`/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    toast('Session deleted.', 'ok', 5000);
+    clearInterval(state.detailPoll);
+    state.currentDetailId = null;
+    state.detailLoadedId = null;
+    show($('#detailView'), false); show($('#dashView'), false); show($('#wizardView'), true);
+    await refreshRuns();
+  } catch (e) {
+    toast(`Couldn't delete the session: ${e.message}`, 'error', 9000);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 $('#btnDetailBack').addEventListener('click', () => { clearInterval(state.detailPoll); show($('#detailView'), false); show($('#dashView'), false); show($('#wizardView'), true); });
 $('#btnNewEngagement').addEventListener('click', () => { leaveLiveJob(); clearInterval(state.detailPoll); show($('#detailView'), false); show($('#liveView'), false); show($('#dashView'), false); show($('#wizardView'), true); });
 
@@ -1566,7 +1588,33 @@ function runButton(r) {
     <span class="sub sub-facts"><span>${r.findings} finding${r.findings === 1 ? '' : 's'}</span><span>${esc(timeAgo(r.ts))}</span></span>`;
   btn.title = `${r.name ? r.name + '\n' : ''}${r.target}\n${r.id}${r.ts ? '\n' + new Date(r.ts * 1000).toLocaleString() : ''}`;
   btn.addEventListener('click', () => openRun(r));
-  return btn;
+  // A hover ✕ so the operator can clear test runs without opening each one.
+  const row = document.createElement('div');
+  row.className = 'sb-run-row';
+  const del = document.createElement('button');
+  del.className = 'sb-run-del';
+  del.textContent = '✕';
+  del.title = 'Delete this session';
+  del.setAttribute('aria-label', 'Delete this session');
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Delete this session permanently?\n\n${r.name || r.target}\n${r.id}\n\nRemoves findings, evidence, PoCs and reports. Cannot be undone.`)) return;
+    try {
+      await api(`/api/runs/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+      if (state.currentDetailId === r.id) {
+        clearInterval(state.detailPoll);
+        state.currentDetailId = null; state.detailLoadedId = null;
+        show($('#detailView'), false); show($('#wizardView'), true);
+      }
+      toast('Session deleted.', 'ok', 4000);
+      await refreshRuns();
+    } catch (err) {
+      toast(`Couldn't delete: ${err.message}`, 'error', 8000);
+    }
+  });
+  row.appendChild(btn);
+  row.appendChild(del);
+  return row;
 }
 
 function renderSidebar() {
